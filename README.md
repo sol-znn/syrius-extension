@@ -262,6 +262,15 @@ The flat `window.postMessage({method: 'znn.requestWalletAccess'})` protocol the
 
 ## Security notes
 
+- Removing a wallet clears its encrypted copy, saved address selection/count,
+  matching last-wallet selection, and labels for its known derived addresses.
+  Labels shared with a retained import of the same seed are preserved. Global
+  node/settings preferences and other wallets remain. Historical labels beyond
+  the known derivation count cannot reliably be attributed when other wallets
+  remain; removing the last wallet clears the whole label map. Cleanup failures
+  keep the encrypted wallet available for retry, though earlier metadata writes
+  may already have succeeded. This is application-level cleanup, with browser
+  backups and forensic storage recovery outside its guarantee.
 - The encrypted keystore lives in the extension's own storage and is opened once
   per unlock. An unlocked session is held in `chrome.storage.session`, which is
   memory-only, cleared when the browser closes, and unreadable by content
@@ -277,6 +286,12 @@ The flat `window.postMessage({method: 'znn.requestWalletAccess'})` protocol the
 - Signing a message is prompted every time too, and the message is shown
   verbatim before the key touches it. It always signs as the address the person
   has selected — a site cannot choose which one answers.
+
+`npm run test:security` includes corrected-candidate wallet-removal checks for
+metadata ownership, shared seeds, legacy names, storage faults/retries, stale
+identity, cancellation, actual removal-screen callbacks, and pinned SDK address
+serialization/derivation. The tests use in-memory storage and public fixture
+data, with no real wallet, existing browser profile, or network transaction.
 
 ## License
 

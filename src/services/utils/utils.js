@@ -1,5 +1,4 @@
 import { KeyStoreManager } from 'znn-ts-sdk';
-import { forgetAddressInfo } from './storage';
 
 // `receiveAllBlocks` moved to services/wallet/account.js, where it is bounded
 // and reports progress. The address bookkeeping moved to services/utils/storage.js,
@@ -42,26 +41,9 @@ const loadStorageWalletNames = () => {
 // Syrius has had this since the beginning.
 const walletStorageKey = 'znn.ts-wallet';
 
-const removeStorageWallet = (walletName) => {
-  try {
-    const wallets = JSON.parse(localStorage.getItem(walletStorageKey) || '{}');
-
-    if (!wallets[walletName]) {
-      return false;
-    }
-    delete wallets[walletName];
-    localStorage.setItem(walletStorageKey, JSON.stringify(wallets));
-    forgetAddressInfo(walletName);
-    return true;
-  } catch (err) {
-    return false;
-  }
-};
-
 export {
   arrayShuffle,
   loadStorageWalletNames,
-  removeStorageWallet,
   sanitizeWalletName,
   walletStorageKey,
 };
