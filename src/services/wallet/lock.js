@@ -13,18 +13,18 @@ import vault from './vault';
 // told connected sites the address was gone, so a site kept showing an account
 // for a wallet the person believed they had just shut.
 const lockWallet = async () => {
+  // Capture the bound shared session before immediately clearing local keys.
+  // Storage failure must never leave this document's decrypted vault usable.
+  const clearing = session.clear();
   vault.lock();
-  await session.clear();
-  await announceLock();
-  // Nothing left over from the unlocked wallet should still be on screen once
-  // the password prompt is.
   notify.dismissAll();
-
-  try {
-    Zenon.getSingleton().clearSocketConnection();
-  } catch (err) {
-    // Already down.
+  try { Zenon.getSingleton().clearSocketConnection(); } catch (err) { /* Already down. */ }
+  let ended;
+  try { ended = await clearing; }
+  catch (error) {
+    throw new Error('Could not lock the shared wallet session. Try locking again or close the browser.');
   }
+  await announceLock(ended);
 };
 
 export default lockWallet;

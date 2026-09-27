@@ -46,9 +46,11 @@ const ChangePassword = () => {
   };
 
   const save = async () => {
+    const activity = session.capture();
     setIsSaving(true);
 
     try {
+      if (!activity || activity.walletName !== walletName) throw new Error('Unlock this wallet again.');
       // Verifying rather than trusting the open keystore: this is exactly the
       // moment to make somebody prove they are the owner.
       if (!(await vault.verifyPassword(currentPassword))) {
@@ -65,7 +67,7 @@ const ChangePassword = () => {
 
       // The session holds entropy, not the password, so it survives this
       // unchanged — but its deadline is worth pushing out after the work.
-      await session.touch();
+      await session.touch(activity);
 
       notify.success('Password changed');
       navigate('/tabs/settings', { replace: true });

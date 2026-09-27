@@ -167,7 +167,7 @@ const getSettings = () => ({ ...defaultSettings, ...readJson(keys.settings, {}) 
 
 const setSetting = (key, value) => {
   const next = { ...getSettings(), [key]: value };
-  writeJson(keys.settings, next);
+  if (!writeJson(keys.settings, next)) throw new Error('Could not save settings. Try again.');
   return next;
 };
 

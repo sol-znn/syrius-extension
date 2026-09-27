@@ -1,85 +1,45 @@
-import { Zenon } from 'znn-ts-sdk';
-import {
-  storeChainIdentifier,
-  storeIsConnected,
-  storeNodeUrl,
-} from '../redux/connectionParametersSlice';
+import { KeyStore, KeyStoreManager, Zenon } from 'znn-ts-sdk';
+import { storeChainIdentifier, storeIsConnected, storeNodeUrl } from '../redux/connectionParametersSlice';
 import { walletUnlocked } from '../redux/walletSlice';
-import {
-  defaultNodeUrl,
-  getAddressInfo,
-  getCurrentNodeUrl,
-  setCurrentNodeUrl,
-  setLastWalletName,
-} from '../utils/storage';
+import { defaultNodeUrl, getAddressInfo, getCurrentNodeUrl, setCurrentNodeUrl, setLastWalletName } from '../utils/storage';
 import { announceUnlock } from './announce';
 import session from './session';
-import vault from './vault';
 
-// Everything that has to happen between "this is the right password" and "the
-// wallet is on screen", in the one order that works.
-//
-// It was inline in the password screen, and the node connection was awaited in
-// the middle of it: if the node was unreachable, `zenon.initialize` threw, the
-// catch showed a toast, and the unlock was abandoned — a wallet that would not
-// open because a server was down, with no way to reach the node settings that
-// would have fixed it. Connecting is attempted here but is not allowed to fail
-// the unlock; the header reports the connection separately.
-
-const connectToNode = async (dispatch) => {
-  const nodeUrl = getCurrentNodeUrl() || defaultNodeUrl;
-  setCurrentNodeUrl(nodeUrl);
-  dispatch(storeNodeUrl(nodeUrl));
-
+const connectToNode = async (dispatch, expected = session.capture()) => {
+  let connected = false;
   try {
+    const nodeUrl = getCurrentNodeUrl() || defaultNodeUrl;
+    setCurrentNodeUrl(nodeUrl);
+    dispatch(storeNodeUrl(nodeUrl));
     await Zenon.getSingleton().initialize(nodeUrl, false, 8000);
-    dispatch(storeIsConnected(true));
-    return true;
-  } catch (err) {
-    dispatch(storeIsConnected(false));
-    return false;
-  }
+    connected = true;
+  } catch (err) { /* Wallet access remains available when node setup fails. */ }
+  if (await session.isCurrent(expected)) dispatch(storeIsConnected(connected));
+  return connected;
 };
 
-// `unlock` is either `{password}` for somebody typing one, or `{entropy}` for
-// resuming a session that has not expired. The entropy path skips Argon2id
-// entirely, which is the difference between a popup that opens instantly and
-// one that hangs for a second every time.
-const completeUnlock = async ({ walletName, password, entropy, dispatch }) => {
-  if (entropy) {
-    vault.unlockWithEntropy(walletName, entropy);
-  } else {
-    await vault.unlockWithPassword(walletName, password);
-  }
-
-  // Recorded only once the password (or entropy) above has actually checked
-  // out — a wrong guess must never become the screen's next default.
-  setLastWalletName(walletName);
-
+// Preparation never adopts key material. Recheck the original revision under
+// the same lock as policy updates before publishing it into the live document.
+const completeUnlock = async ({ walletName, password, record, dispatch, isCancelled = () => false }) => {
+  const expected = record || await session.begin();
+  const keyStore = record ? new KeyStore().fromEntropy(record.entropy) :
+    await new KeyStoreManager().readKeyStore(password, walletName);
+  if (!keyStore) throw new Error('Error decrypting');
   const addressInfo = getAddressInfo(walletName);
-  vault.setSelectedIndex(addressInfo.selectedAddressIndex);
-  const address = await vault.getAddress();
-
-  dispatch(
-    walletUnlocked({
-      walletName,
-      address,
-      selectedAddressIndex: addressInfo.selectedAddressIndex,
-      maxAddressIndex: addressInfo.maxAddressIndex,
-    })
-  );
-  dispatch(storeChainIdentifier(Zenon.getChainIdentifier()));
-
-  await session.save({
-    walletName,
-    entropy: vault.getEntropy(),
-    selectedAddressIndex: addressInfo.selectedAddressIndex,
-  });
-
-  const isConnected = await connectToNode(dispatch);
-  await announceUnlock(address);
-
+  const index = record ? record.selectedAddressIndex : addressInfo.selectedAddressIndex;
+  const address = (await keyStore.getKeyPair(index).getAddress()).toString();
+  if (isCancelled()) throw new Error('Wallet startup was cancelled');
+  const chainId = Zenon.getChainIdentifier();
+  const prepare = () => setLastWalletName(walletName);
+  const commit = () => {
+    dispatch(walletUnlocked({ walletName, address, selectedAddressIndex: index,
+      maxAddressIndex: Math.max(addressInfo.maxAddressIndex, index + 1) }));
+    dispatch(storeChainIdentifier(chainId));
+  };
+  const token = record ? await session.restore(record, keyStore, commit, prepare) :
+    await session.create(expected, { walletName, entropy: keyStore.entropy, selectedAddressIndex: index }, keyStore, commit, prepare);
+  const isConnected = await connectToNode(dispatch, token);
+  await announceUnlock(token);
   return { address, isConnected };
 };
-
 export { completeUnlock, connectToNode };

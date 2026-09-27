@@ -2,6 +2,7 @@ import React from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useDispatch } from 'react-redux';
 
+import { notify } from '../../services/utils/notify';
 import lockWallet from '../../services/wallet/lock';
 import { resetWalletState } from '../../services/redux/walletSlice';
 import { resetPendingTransactions } from '../../services/redux/pendingTransactionsSlice';
@@ -31,14 +32,17 @@ const BurgerPopover = ({ onNavigate = () => {} }) => {
     navigate(path);
   };
 
-  const lock = async () => {
+  const leave = async (destination) => {
     onNavigate();
-    await lockWallet();
+    let locked = false;
+    try { await lockWallet(); locked = true; }
+    catch (error) { notify.error(error); }
     invalidateAccountCache();
     dispatch(resetWalletState());
     dispatch(resetPendingTransactions());
-    navigate('/password', { replace: true });
+    navigate(locked ? destination : '/password', { replace: true });
   };
+  const lock = () => leave('/password');
 
   return (
     <div className="burger-popover-container" role="menu">
@@ -91,17 +95,7 @@ const BurgerPopover = ({ onNavigate = () => {} }) => {
       </Item>
 
       <Item
-        onClick={async () => {
-          // Adding a wallet means leaving this one, so it locks first. The old
-          // version only cleared the background's password cache and navigated,
-          // which left the decrypted keys of the previous wallet in memory.
-          onNavigate();
-          await lockWallet();
-          invalidateAccountCache();
-          dispatch(resetWalletState());
-          dispatch(resetPendingTransactions());
-          navigate('/auth/onboarding');
-        }}
+        onClick={() => leave('/auth/onboarding')}
         icon={
           <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true">
             <path

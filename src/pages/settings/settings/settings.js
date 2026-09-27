@@ -2,7 +2,9 @@ import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 
 import SettingsItem from '../../../components/settings-item/settings-item';
-import { getSettings, setSetting } from '../../../services/utils/storage';
+import { getSettings } from '../../../services/utils/storage';
+import session from '../../../services/wallet/session';
+import { notify } from '../../../services/utils/notify';
 import { explorerChoices } from '../../../services/utils/explorer';
 
 // The settings index.
@@ -24,7 +26,13 @@ const Settings = () => {
   const navigate = useNavigate();
   const [settings, setSettings] = useState(() => getSettings());
 
-  const update = (key, value) => setSettings(setSetting(key, value));
+  const [isSaving, setIsSaving] = useState(false);
+  const update = async (key, value) => {
+    setIsSaving(true);
+    try { setSettings(await session.updateSetting(key, value)); }
+    catch (error) { notify.error(error); }
+    finally { setIsSaving(false); }
+  };
 
   return (
     <div className="page">
@@ -63,6 +71,7 @@ const Settings = () => {
               className={`segmented-option ${
                 settings.autoLockMinutes === choice.minutes ? 'is-selected' : ''
               }`}
+              disabled={isSaving}
               onClick={() => update('autoLockMinutes', choice.minutes)}
             >
               {choice.label}
@@ -80,6 +89,7 @@ const Settings = () => {
           type="checkbox"
           className="switch"
           checked={settings.autoReceive}
+          disabled={isSaving}
           onChange={(event) => update('autoReceive', event.target.checked)}
         />
       </label>
@@ -97,6 +107,7 @@ const Settings = () => {
               className={`segmented-option ${
                 settings.explorer === choice.key ? 'is-selected' : ''
               }`}
+              disabled={isSaving}
               onClick={() => update('explorer', choice.key)}
             >
               {choice.label}

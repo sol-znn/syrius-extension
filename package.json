@@ -21,7 +21,7 @@
     "prettier": "prettier --write '**/*.{js,jsx,ts,tsx,json,css,scss,md}'",
     "lint": "eslint src/**/*.js src/**/*.jsx",
     "test": "node utils/contract-calls-test.js",
-    "test:security": "node utils/bigint-buffer-test.js"
+    "test:security": "node utils/bigint-buffer-test.js && node utils/session-policy-test.js"
   },
   "dependencies": {
     "@reduxjs/toolkit": "^1.8.1",

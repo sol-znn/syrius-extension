@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { useDispatch, useSelector } from 'react-redux';
+import { useDispatch } from 'react-redux';
 import { Zenon } from 'znn-ts-sdk';
 
 import NodeList from '../../../components/node-list/node-list';
@@ -7,6 +7,7 @@ import useNodeList from '../../../services/hooks/useNodeList';
 import { storeChainIdentifier } from '../../../services/redux/connectionParametersSlice';
 import { detectNodeChainId, mainnetChainId, parseChainId } from '../../../services/utils/chainId';
 import { notify } from '../../../services/utils/notify';
+import session from '../../../services/wallet/session';
 import { announceChain } from '../../../services/wallet/announce';
 
 // Node and chain settings.
@@ -19,7 +20,6 @@ import { announceChain } from '../../../services/wallet/announce';
 const ChangeNode = () => {
   const dispatch = useDispatch();
   const nodeList = useNodeList();
-  const address = useSelector((state) => state.wallet.address);
 
   const [chainId, setChainId] = useState(() => Zenon.getChainIdentifier());
   const [draftChainId, setDraftChainId] = useState(() => String(Zenon.getChainIdentifier()));
@@ -38,6 +38,7 @@ const ChangeNode = () => {
   // connection but of the blocks this wallet signs, and the SDK reads it back
   // from storage for every block it builds.
   const applyChainId = async (value) => {
+    const activity = session.capture();
     const parsed = parseChainId(value);
 
     if (parsed === null) {
@@ -48,7 +49,7 @@ const ChangeNode = () => {
     setChainId(parsed);
     setDraftChainId(String(parsed));
     dispatch(storeChainIdentifier(parsed));
-    await announceChain(parsed, address);
+    await announceChain(activity);
 
     notify.success(`Signing for chain ${parsed}`);
   };

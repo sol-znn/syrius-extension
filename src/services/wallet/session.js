@@ -1,123 +1,206 @@
-import { getSettings } from '../utils/storage';
+import { Zenon } from 'znn-ts-sdk';
+import { getSettings, getCurrentNodeUrl, setSetting as persistSetting, setAddressInfo } from '../utils/storage';
+import { sendInternalQuietly } from '../utils/messaging';
+import state from './sessionState';
+import vault from './vault';
 
-// Keeping the wallet unlocked between popup opens.
-//
-// A popup is destroyed the moment it loses focus, so without somewhere to put
-// the unlocked state the password would have to be typed again on every single
-// open. The old build put it in a `const walletCredentials = {...}` at the top
-// of the background script, which was wrong twice over:
-//
-//   - Under manifest v3 the background is a service worker that is unloaded
-//     when idle, taking every module-level variable with it. The unlock
-//     survived for as long as Chrome felt like keeping the worker alive, which
-//     is why the password prompt reappeared at random.
-//   - It held the wallet password in plain text and handed it to any sender
-//     that asked, with no check on who was asking (finding #2 of the audit).
-//
-// `chrome.storage.session` is the store for this: it lives in memory, never
-// touches disk, is cleared when the browser closes, and its default access
-// level keeps content scripts out. What goes in is the keystore's entropy
-// rather than the password — it unlocks the same wallet without a key
-// derivation run, and it is not a secret the person may have reused elsewhere.
-
-const sessionKey = 'znn.unlock';
-
-// The deadline is stored as an absolute time rather than recomputed from
-// settings on each read, because the background service worker also has to be
-// able to expire a session and it has no `localStorage` to read settings from.
-const deadlineFromNow = () => {
-  const { autoLockMinutes } = getSettings();
-
-  // Zero means "lock as soon as the popup closes", which is a real preference.
-  return autoLockMinutes > 0 ? Date.now() + autoLockMinutes * 60 * 1000 : 0;
+const ownerId = crypto.randomUUID();
+let binding = null;
+const changed = () => new Error('The wallet session changed. Try again or unlock the wallet.');
+const minutesValid = (minutes) => [0, 5, 15, 60].includes(minutes);
+const preferredMinutes = () => {
+  const minutes = getSettings().autoLockMinutes;
+  return minutesValid(minutes) ? minutes : 15;
 };
-
-const readRaw = async () => {
-  try {
-    const stored = await chrome.storage.session.get(sessionKey);
-    return stored[sessionKey] || null;
-  } catch (err) {
-    return null;
-  }
+const sameVault = (value) => Boolean(value && vault.isUnlocked() &&
+  value.walletName === vault.getWalletName() && value.key === vault.getKeyPair(0));
+const bind = (record) => {
+  binding = Object.freeze({ ...state.token(record), walletName: record.walletName,
+    index: record.selectedAddressIndex, key: vault.getKeyPair(0) });
 };
-
-const clear = async () => {
-  try {
-    await chrome.storage.session.remove(sessionKey);
-  } catch (err) {
-    // Nothing useful to do; the popup treats it as locked either way.
-  }
+// Synchronous capture matters: a caller must retain this value across its first
+// await, rather than obtaining a fresh policy revision after its work finishes.
+const capture = () => sameVault(binding) ? binding : null;
+const assert = (record, expected) => {
+  if (!sameVault(expected) || !state.matches(record, expected) || !state.live(record, ownerId) ||
+    expected.index !== vault.getSelectedIndex() || expected.index !== record.selectedAddressIndex) throw changed();
 };
-
-const save = async ({ walletName, entropy, selectedAddressIndex = 0 }) => {
+// New deliberate activity in a still-open timed document may use a changed
+// policy. Already-running callbacks keep their immutable earlier token.
+chrome.storage.onChanged.addListener((changes, area) => {
+  const record = changes[state.sessionKey]?.newValue;
+  if (area === 'session' && sameVault(binding) && record?.id === binding.id &&
+    record.selectedAddressIndex === vault.getSelectedIndex() && state.live(record, ownerId)) bind(record);
+});
+const advance = async (current, next) => {
+  const previous = await state.publicValue(current);
+  if (!state.live(current, ownerId)) throw changed();
+  return state.write(next, previous && state.timed(next) && current.selectedAddressIndex === next.selectedAddressIndex
+    ? { ...previous, token: state.token(next) } : null);
+};
+const begin = () => state.run(async () => state.token(await state.read()));
+const load = () => state.run(async () => {
+  const current = await state.read();
+  if (state.timed(current)) return current;
+  // An On close owner's marker has no entropy and is never resumable. Reading
+  // it from a fresh document must not revoke that owner's private session.
+  if (current && ((current.mode !== 'local' && current.mode !== 'ended') ||
+    (current.mode === 'local' && current.privateUntil && current.privateUntil <= Date.now()))) await state.write(state.ended());
+  return null;
+});
+const clear = (expected) => {
+  // Failed restore cleanup is exact-revision conditional. Explicit Lock revokes
+  // this document's session ID even if another window advanced its revision.
+  if (expected !== undefined) return state.clear(expected ? state.token(expected) : null);
+  const owned = binding;
+  return state.run(async () => {
+    const current = await state.read();
+    if (!owned || current?.id !== owned.id) return null;
+    return state.write(state.ended());
+  });
+};
+const recordFor = (values, minutes, id = crypto.randomUUID()) => ({
+  version: 1, id, revision: crypto.randomUUID(), ownerId, minutes,
+  walletName: values.walletName, selectedAddressIndex: values.selectedAddressIndex,
+  lastActiveAt: Date.now(), expiresAt: minutes ? Date.now() + minutes * 60000 : 0,
+  mode: minutes ? 'timed' : 'local', ...(minutes ? { entropy: values.entropy } : {}),
+  ...(!minutes && values.privateUntil ? { privateUntil: values.privateUntil } : {}),
+});
+const adopt = (record, keyStore) => {
+  vault.adopt(record.walletName, keyStore);
+  vault.setSelectedIndex(record.selectedAddressIndex);
+  bind(record);
+};
+const create = (expected, values, keyStore, commit, prepare = () => {}) => state.run(async () => {
+  if (!state.matches(await state.read(), expected)) throw changed();
+  const next = recordFor(values, preferredMinutes());
+  prepare();
+  await state.write(next);
+  adopt(next, keyStore);
+  commit();
+  return capture();
+});
+const restore = (original, keyStore, commit, prepare = () => {}) => state.run(async () => {
+  const current = await state.read();
+  if (!state.matches(current, original) || !state.timed(current)) throw changed();
+  const next = recordFor(current, current.minutes, current.id);
+  prepare();
+  await advance(current, next);
+  adopt(next, keyStore);
+  commit();
+  return capture();
+});
+const isCurrent = (expected) => state.run(async () => {
+  try { assert(await state.read(), expected); return true; } catch (error) { return false; }
+});
+const touch = async (expected) => {
+  // Password persistence has already succeeded before this optional renewal.
+  // Preserve the base boolean contract for stale authority AND storage failure.
   try {
-    await chrome.storage.session.set({
-      [sessionKey]: {
-        walletName,
-        entropy,
-        selectedAddressIndex,
-        lastActiveAt: Date.now(),
-        expiresAt: deadlineFromNow(),
-      },
+    return await state.run(async () => {
+      const current = await state.read();
+      assert(current, expected);
+      const next = recordFor({ ...current, entropy: vault.getEntropy() }, current.minutes, current.id);
+      await advance(current, next);
+      bind(next);
+      return true;
     });
-    return true;
-  } catch (err) {
-    return false;
-  }
+  } catch (error) { return false; }
 };
 
-// Returns the stored unlock, or null when there is none or it has gone stale.
-// An expired session is removed on the way out rather than left to rot.
-const load = async () => {
-  const unlock = await readRaw();
-
-  if (!unlock || !unlock.walletName || !unlock.entropy) {
-    return null;
-  }
-  if (!unlock.expiresAt || Date.now() > unlock.expiresAt) {
-    await clear();
-    return null;
-  }
-  return unlock;
+const select = async (expected, index, maxAddressIndex, commit) => {
+  if (!sameVault(expected) || !Number.isInteger(index) || index < 0 || index >= maxAddressIndex) throw changed();
+  const key = vault.getKeyPair(index);
+  const address = (await key.getAddress()).toString();
+  return state.run(async () => {
+    const current = await state.read();
+    assert(current, expected);
+    if (!setAddressInfo(current.walletName, { selectedAddressIndex: index, maxAddressIndex })) {
+      throw new Error('Could not save the selected address. Try again.');
+    }
+    const next = recordFor({ ...current, selectedAddressIndex: index, entropy: vault.getEntropy() }, current.minutes, current.id);
+    await state.write(next);
+    vault.setSelectedIndex(index);
+    bind(next);
+    commit(address);
+    return capture();
+  });
 };
-
-// Pushes the auto-lock deadline out. Called as the popup opens and whenever the
-// selected address changes, so the stored index stays in step too.
-const touch = async (patch = {}) => {
-  const unlock = await readRaw();
-
-  if (!unlock) {
-    return false;
-  }
-  return save({ ...unlock, ...patch });
-};
-
-//
-// The parts of the unlocked state that are not secret: the address a site would
-// be told about, the chain blocks are signed for, the node in use. The
-// background service worker needs these to answer a page without holding key
-// material or linking the 5 MiB SDK into itself, so the popup publishes them
-// here and the worker only ever reads.
-//
-const publicStateKey = 'znn.publicState';
-
-const publish = async (publicState) => {
+const publish = async (expected, values) => {
+  // Public advertisement is best-effort. Its storage/hash failures must not
+  // turn an already-committed unlock into an apparent password failure.
   try {
-    await chrome.storage.session.set({ [publicStateKey]: publicState });
-    return true;
-  } catch (err) {
-    return false;
-  }
+    if (!sameVault(expected)) return false;
+    const key = vault.getKeyPair(expected.index);
+    const address = (await key.getAddress()).toString();
+    return await state.run(async () => {
+      const current = await state.read();
+      assert(current, expected);
+      if (!state.timed(current)) return false;
+      await state.write(current, { ...values, address, token: state.token(current) });
+      return true;
+    });
+  } catch (error) { return false; }
 };
 
-const unpublish = async () => {
+const updateSetting = async (key, value) => {
+  const expected = capture();
+  const address = key === 'autoLockMinutes' && expected ?
+    (await vault.getKeyPair(expected.index).getAddress()).toString() : null;
+  let updatedToken;
   try {
-    await chrome.storage.session.remove(publicStateKey);
-  } catch (err) {
-    // Ignored.
+    return await state.run(async () => {
+      if (key !== 'autoLockMinutes') return persistSetting(key, value);
+      if (!minutesValid(value)) throw new Error('Choose a supported lock duration.');
+      const current = await state.read();
+      if (!state.timed(current) && (current?.mode !== 'local' ||
+        (current.privateUntil && current.privateUntil <= Date.now()))) {
+        const ended = await state.write(state.ended());
+        updatedToken = state.token(ended);
+        return persistSetting(key, value);
+      }
+      assert(current, expected);
+      const entropy = vault.getEntropy();
+      const previousDeadline = current.mode === 'timed' ? current.expiresAt : current.privateUntil;
+      const next = { ...current, revision: crypto.randomUUID(), ownerId, minutes: value,
+        mode: value ? 'timed' : 'local',
+        expiresAt: value ? (previousDeadline ? Math.min(previousDeadline, Date.now() + value * 60000) : Date.now() + value * 60000) : 0 };
+      delete next.entropy;
+      delete next.privateUntil;
+      if (value) next.entropy = entropy;
+      const publicValue = state.timed(next) ? { address, chainId: Zenon.getChainIdentifier(),
+        nodeUrl: getCurrentNodeUrl(), token: state.token(next) } : null;
+      // Before preference persistence only tighten authority. If a relaxation's
+      // second write fails, the stored policy may be newer but the current
+      // session remains stricter; report failure and allow an explicit retry.
+      const removesDeadline = value === 0 && Boolean(previousDeadline);
+      const relaxing = removesDeadline || (value > 0 && (current.mode === 'local' || value > current.minutes));
+      // Timed -> On close both removes resumability and relaxes the owner's
+      // lifetime. The intermediate state must keep the intersection: no entropy
+      // and the original private deadline until preference persistence succeeds.
+      // Conversely, local -> timed must install the new private deadline before
+      // saving that finite preference, while still withholding resumable entropy.
+      const stage = removesDeadline ? { ...next, revision: crypto.randomUUID(), privateUntil: previousDeadline } :
+        current.mode === 'local' && value > 0 ? { ...current, revision: crypto.randomUUID(), privateUntil: next.expiresAt } :
+          relaxing ? { ...current, revision: crypto.randomUUID() } : next;
+      if (relaxing) await advance(current, stage);
+      else await state.write(stage, publicValue);
+      bind(stage);
+      updatedToken = state.token(stage);
+      const settings = persistSetting(key, value);
+      if (relaxing) {
+        if (!state.live(stage, ownerId)) throw changed();
+        await state.write(next, publicValue);
+        bind(next);
+        updatedToken = state.token(next);
+      }
+      return settings;
+    });
+  } finally {
+    if (updatedToken) await sendInternalQuietly('events.accountsChanged', { token: updatedToken });
   }
 };
 
-const session = { load, save, touch, clear, publish, unpublish, sessionKey, publicStateKey };
-
+const session = { sessionKey: state.sessionKey, publicStateKey: state.publicStateKey,
+  capture, begin, load, clear, create, restore, isCurrent, touch, select, publish, updateSetting };
 export default session;

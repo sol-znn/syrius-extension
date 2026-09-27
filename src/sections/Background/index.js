@@ -1,6 +1,7 @@
 import frames from './frames';
 import permissions from './permissions';
 import requests from './requests';
+import sessionState from '../../services/wallet/sessionState';
 
 // The service worker.
 //
@@ -17,8 +18,6 @@ import requests from './requests';
 // evaporated at random and answered `internal.getCredentialsFromBackgroundScript`
 // for any sender at all.
 
-const unlockKey = 'znn.unlock';
-const publicStateKey = 'znn.publicState';
 
 // Kept in step with `services/wallet/signMessage.js`, and duplicated rather
 // than imported: this file is a service worker that deliberately does not link
@@ -67,33 +66,21 @@ const isFromContentScript = (sender) =>
   typeof sender.url === 'string' &&
   !sender.url.startsWith(extensionOrigin);
 
-const readSession = async (key) => {
-  try {
-    const stored = await chrome.storage.session.get(key);
-    return stored[key] || null;
-  } catch (err) {
-    return null;
-  }
-};
-
-// The public view of the unlocked wallet, or null when it is locked or the
-// session has aged out. Expiry is enforced here as well as in the popup so a
-// site cannot read an address out of a session the person believes is closed.
-const getPublicState = async () => {
-  const unlock = await readSession(unlockKey);
-
-  if (!unlock || !unlock.expiresAt || Date.now() > unlock.expiresAt) {
-    return null;
-  }
-  return readSession(publicStateKey);
-};
+const getPublicState = () => sessionState.run(async () =>
+  sessionState.publicValue(await sessionState.read()));
 
 //
 // Talking back to pages
 //
 const sendToTab = async (tabId, message, frameId) => {
   try {
-    await chrome.tabs.sendMessage(tabId, message, frameId === undefined ? {} : { frameId });
+    let timer;
+    try {
+      await Promise.race([
+        chrome.tabs.sendMessage(tabId, message, frameId === undefined ? {} : { frameId }),
+        new Promise((resolve) => { timer = setTimeout(resolve, 5000); }),
+      ]);
+    } finally { clearTimeout(timer); }
   } catch (err) {
     // The tab navigated away or closed. Nothing to deliver to and nothing to
     // do about it.
@@ -105,7 +92,7 @@ const respond = (target, id, result, error) =>
 
 // Fans an event out to every frame whose origin is connected, so a site sees
 // an address or chain change without polling.
-const broadcast = async (event, data) => {
+const broadcast = async (event, data, valid = () => true) => {
   const connected = await permissions.list();
 
   if (!connected.length) {
@@ -116,7 +103,7 @@ const broadcast = async (event, data) => {
 
   await Promise.all(
     targets.map((frame) =>
-      sendToTab(frame.tabId, { channel: 'znn', kind: 'event', event, data }, frame.frameId)
+      valid() ? sendToTab(frame.tabId, { channel: 'znn', kind: 'event', event, data }, frame.frameId) : null
     )
   );
 };
@@ -150,17 +137,9 @@ const queueApproval = async (type, { id, target, origin, sender, params }) => {
 const providerMethods = {
   // Cheap, unprompted truth about the current state. A site uses this to decide
   // whether to show a "connect" button, so it must never open a window.
-  znn_accounts: async ({ origin }) => {
-    if (!(await permissions.isConnected(origin))) {
-      return [];
-    }
-    const state = await getPublicState();
-    return state?.address ? [state.address] : [];
-  },
-
-  znn_chainId: async () => (await getPublicState())?.chainId ?? null,
-
-  znn_nodeUrl: async () => (await getPublicState())?.nodeUrl ?? null,
+  znn_accounts: async () => ({ publicRead: 'accounts' }),
+  znn_chainId: async () => ({ publicRead: 'chainId' }),
+  znn_nodeUrl: async () => ({ publicRead: 'nodeUrl' }),
 
   // Connecting. An origin that has been connected before and is still unlocked
   // is answered straight away — re-asking a question already answered is the
@@ -170,7 +149,7 @@ const providerMethods = {
 
     if ((await permissions.isConnected(origin)) && state?.address) {
       await permissions.touch(origin);
-      return { settled: true, result: [state.address] };
+      return { settled: true, result: [state.address], token: state.token };
     }
     await queueApproval('connect', { id, target, origin, sender });
     return { settled: false };
@@ -248,11 +227,30 @@ const handleProviderRequest = async (request, sender) => {
   try {
     const outcome = await handler({ id, origin, target, sender, params });
 
+    if (outcome?.publicRead) {
+      await sessionState.run(async () => {
+        const connected = outcome.publicRead !== 'accounts' || await permissions.isConnected(origin);
+        const current = await sessionState.read();
+        const state = await sessionState.publicValue(current);
+        const visible = sessionState.timed(current) ? state : null;
+        const result = outcome.publicRead === 'accounts' ?
+          (connected && visible?.address ? [visible.address] : []) : visible?.[outcome.publicRead] ?? null;
+        await respond(target, id, result);
+      });
+      return;
+    }
     // Read-only methods return their value directly; the ones that need a
     // person return `{settled: false}` and are answered when the popup does.
     if (outcome && typeof outcome === 'object' && 'settled' in outcome) {
       if (outcome.settled) {
-        await respond(target, id, outcome.result);
+        if (outcome.token) {
+          await sessionState.run(async () => {
+            const current = await sessionState.read();
+            if (sessionState.matches(current, outcome.token) && sessionState.timed(current)) {
+              await respond(target, id, outcome.result);
+            } else await respond(target, id, undefined, errors.disconnected);
+          });
+        } else await respond(target, id, outcome.result);
       }
       return;
     }
@@ -262,6 +260,22 @@ const handleProviderRequest = async (request, sender) => {
     await respond(target, id, undefined, error);
   }
 };
+
+// The popup supplies only a revision. Read the current coherent payload here;
+// queued messages from before a policy change cannot advertise an old wallet.
+const broadcastState = (event, expected) => sessionState.run(async () => {
+  const current = await sessionState.read();
+  if (!sessionState.matches(current, expected)) return false;
+  const value = await sessionState.publicValue(current);
+  if (!value || !sessionState.timed(current)) {
+    if (event === 'accountsChanged') await broadcast(event, []);
+  } else {
+    const payload = event === 'accountsChanged' ? [value.address] :
+      event === 'chainChanged' ? value.chainId : value.nodeUrl;
+    await broadcast(event, payload, () => sessionState.timed(current));
+  }
+  return true;
+});
 
 //
 // Popup-facing methods
@@ -313,25 +327,10 @@ const internalMethods = {
   //
   // State changes the popup makes that sites care about
   //
-  'events.accountsChanged': async ({ address }) => {
-    await broadcast('accountsChanged', address ? [address] : []);
-    return true;
-  },
-  'events.chainChanged': async ({ chainId }) => {
-    await broadcast('chainChanged', chainId);
-    return true;
-  },
-  'events.nodeChanged': async ({ nodeUrl }) => {
-    await broadcast('nodeChanged', nodeUrl);
-    return true;
-  },
-
-  // Locking has to reach the pages too, or a site keeps showing an address for
-  // a wallet that is shut.
-  'session.locked': async () => {
-    await broadcast('accountsChanged', []);
-    return true;
-  },
+  'events.accountsChanged': ({ token }) => broadcastState('accountsChanged', token),
+  'events.chainChanged': ({ token }) => broadcastState('chainChanged', token),
+  'events.nodeChanged': ({ token }) => broadcastState('nodeChanged', token),
+  'session.locked': ({ token }) => broadcastState('accountsChanged', token),
 };
 
 //
@@ -437,10 +436,12 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name !== autoLockAlarm) {
     return;
   }
-  const unlock = await readSession(unlockKey);
-
-  if (unlock && (!unlock.expiresAt || Date.now() > unlock.expiresAt)) {
-    await chrome.storage.session.remove([unlockKey, publicStateKey]);
-    await broadcast('accountsChanged', []);
-  }
+  await sessionState.run(async () => {
+    const current = await sessionState.read();
+    if ((current?.mode === 'timed' && !sessionState.timed(current)) ||
+      (current?.mode === 'local' && current.privateUntil && current.privateUntil <= Date.now())) {
+      await sessionState.write(sessionState.ended());
+      await broadcast('accountsChanged', []);
+    }
+  });
 });

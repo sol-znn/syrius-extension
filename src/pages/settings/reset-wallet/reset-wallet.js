@@ -46,12 +46,11 @@ const ResetWallet = () => {
         return;
       }
 
+      await lockWallet();
       if (!removeStorageWallet(walletName)) {
-        notify.error('Could not remove that wallet.');
-        return;
+        throw new Error('Could not remove that wallet.');
       }
 
-      await lockWallet();
       invalidateAccountCache();
       dispatch(resetWalletState());
       dispatch(resetPendingTransactions());
@@ -63,6 +62,12 @@ const ResetWallet = () => {
       );
     } catch (err) {
       notify.error(err);
+      if (!vault.isUnlocked()) {
+        invalidateAccountCache();
+        dispatch(resetWalletState());
+        dispatch(resetPendingTransactions());
+        navigate('/password', { replace: true });
+      }
     } finally {
       setIsRemoving(false);
     }

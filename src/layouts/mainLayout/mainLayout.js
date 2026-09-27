@@ -11,6 +11,7 @@ import Splash from '../../components/splash/splash';
 
 import { completeUnlock } from '../../services/wallet/bootstrap';
 import session from '../../services/wallet/session';
+import { notify } from '../../services/utils/notify';
 import { loadStorageWalletNames } from '../../services/utils/utils';
 import { getCurrentNodeUrl } from '../../services/utils/storage';
 import { isDevWalletBuild, prepareDevWallet } from '../../services/utils/devWallet';
@@ -97,7 +98,8 @@ const MainLayout = () => {
         try {
           await completeUnlock({
             walletName: unlock.walletName,
-            entropy: unlock.entropy,
+            record: unlock,
+            isCancelled: () => cancelled,
             dispatch,
           });
           if (!cancelled) {
@@ -110,14 +112,19 @@ const MainLayout = () => {
         } catch (err) {
           // A session that cannot be turned back into a wallet is a session
           // worth forgetting rather than one worth reporting.
-          await session.clear();
+          await session.clear(unlock);
         }
       }
 
       navigateIfNeeded('/password', { state: { returnTo: deepLink } });
     };
 
-    boot().finally(() => {
+    boot().catch((error) => {
+      if (!cancelled) {
+        notify.error(error);
+        navigate('/password', { replace: true });
+      }
+    }).finally(() => {
       if (!cancelled) {
         setIsBooting(false);
       }

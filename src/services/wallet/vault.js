@@ -174,6 +174,7 @@ const vault = {
   getAddressObject,
   getAddresses,
   verifyPassword,
+  adopt,
   lock,
 };
 
