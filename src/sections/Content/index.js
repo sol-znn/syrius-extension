@@ -1,205 +1,155 @@
-// The relay between the page and the extension.
-//
-// It runs in the isolated world: it can see the page's DOM and its
-// postMessages, and it can talk to the service worker, but the page cannot
-// reach into it. That makes it the only place the two can meet, and the reason
-// it stays this thin — it forwards, it never decides. Every decision that
-// matters is taken in the background against the origin Chrome reports for this
-// frame, not against anything a page says about itself.
-//
-// Two protocols come in. The current one is the request/response transport
-// behind `window.zenon` (see src/sections/Inpage). The other is the flat
-// `{method: "znn.requestWalletAccess"}` postMessage the old build used, which
-// is kept working here so sites written against it do not break.
+import observeDocumentLifetime from '../../services/utils/documentLifetime';
 
+// The isolated relay owns activation and request tokens. Page messages supply
+// only correlation, method and parameters; they cannot select these bindings.
 const inpageTarget = 'znn-inpage';
 const contentTarget = 'znn-contentscript';
-
-const postToPage = (message) => window.postMessage(message, window.location.origin);
-
-const sendToBackground = (message) => {
-  try {
-    chrome.runtime.sendMessage(message, () => {
-      // Reading `lastError` is what stops Chrome logging "Unchecked runtime
-      // lastError" when the worker is still starting up. The real answer comes
-      // back over `chrome.tabs.sendMessage`, not through this callback.
-      void chrome.runtime.lastError;
-    });
-  } catch (err) {
-    // The extension was reloaded or removed while the page stayed open. The
-    // page's request will time out on its own.
-  }
+const postToPage = message => window.postMessage(message, window.location.origin);
+// getRandomValues is also available on HTTP pages. randomUUID requires a
+// secure context, while this relay is intentionally injected on HTTP too.
+const privateToken = () => {
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 15) | 64;
+  bytes[8] = (bytes[8] & 63) | 128;
+  const hex = Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 };
-
-//
-// Legacy protocol
-//
-// The old bridge had no request ids, so a reply could only be matched to a
-// request by its message name. That is preserved exactly: one legacy call of
-// each kind can be in flight, and its reply is republished under the name the
-// old code listens for.
-//
+let active = Boolean(document.documentElement);
+let activation = privateToken();
+let legacyCounter = 0;
+const outstanding = new Map();
+const approvalMethods = new Set(['znn_connect', 'znn_sendTransaction', 'znn_signAndSendBlock', 'znn_sign']);
+const transportError = message => ({ code: 4900, message });
 const legacyRequests = {
   'znn.requestWalletAccess': {
     method: 'znn_connect',
-    onSuccess: (accounts) => ({
-      method: 'znn.grantedWalletRead',
-      data: { address: accounts?.[0] || null },
-    }),
-    onError: (error) => ({ method: 'znn.deniedWalletRead', error: error?.message, data: {} }),
+    onSuccess: accounts => ({ method: 'znn.grantedWalletRead', data: { address: accounts?.[0] || null } }),
+    onError: error => ({ method: 'znn.deniedWalletRead', error: error?.message, data: {} }),
   },
   'znn.sendTransactionToSigning': {
     method: 'znn_sendTransaction',
-    onSuccess: (data) => ({ method: 'znn.signedTransaction', data }),
-    onError: (error) => ({ method: 'znn.deniedSignTransaction', error: error?.message, data: {} }),
+    onSuccess: data => ({ method: 'znn.signedTransaction', data }),
+    onError: error => ({ method: 'znn.deniedSignTransaction', error: error?.message, data: {} }),
   },
   'znn.sendAccountBlockToSend': {
     method: 'znn_signAndSendBlock',
-    onSuccess: (data) => ({ method: 'znn.accountBlockSent', data }),
-    onError: (error) => ({ method: 'znn.deniedSendAccountBlock', error: error?.message, data: {} }),
+    onSuccess: data => ({ method: 'znn.accountBlockSent', data }),
+    onError: error => ({ method: 'znn.deniedSendAccountBlock', error: error?.message, data: {} }),
   },
 };
 
-// Ids issued for legacy calls, so the background can stay on one protocol.
-const legacyInFlight = new Map();
-let legacyCounter = 0;
-
-// The legacy grant reply carried the chain and node alongside the address, and
-// they are read-only calls, so they are gathered before the reply goes out.
-const decorateLegacyGrant = async (payload) => {
-  if (payload.method !== 'znn.grantedWalletRead') {
-    return payload;
-  }
-  const [chainId, nodeUrl] = await Promise.all([
-    requestValue('znn_chainId'),
-    requestValue('znn_nodeUrl'),
-  ]);
-  return { ...payload, data: { ...payload.data, chainId, nodeUrl } };
-};
-
-// A small promise wrapper for the read-only methods this file needs itself.
-const valueWaiters = new Map();
-
-const requestValue = (method) =>
-  new Promise((resolve) => {
-    legacyCounter += 1;
-    const id = `znn-cs-${Date.now().toString(36)}-${legacyCounter}`;
-    const timer = setTimeout(() => {
-      valueWaiters.delete(id);
-      resolve(null);
-    }, 10000);
-
-    valueWaiters.set(id, { resolve, timer });
-    sendToBackground({ channel: 'znn', kind: 'request', id, method, params: {} });
-  });
-
-// Announce this frame so the worker can deliver events to it later. Doing it
-// this way is what keeps the `tabs` permission — "Read your browsing history"
-// on the install prompt — off this extension.
-sendToBackground({ channel: 'znn', kind: 'hello' });
-
-//
-// Page -> background
-//
-window.addEventListener(
-  'message',
-  (event) => {
-    if (event.source !== window) {
-      return;
-    }
-    const message = event.data;
-
-    if (!message || typeof message !== 'object') {
-      return;
-    }
-
-    // Current protocol.
-    if (message.target === contentTarget && message.kind === 'request') {
-      sendToBackground({
-        channel: 'znn',
-        kind: 'request',
-        id: message.id,
-        method: message.method,
-        params: message.params,
-      });
-      return;
-    }
-
-    // Legacy protocol.
-    const legacy = legacyRequests[message.method];
-
-    if (legacy) {
-      legacyCounter += 1;
-      const id = `znn-legacy-${Date.now().toString(36)}-${legacyCounter}`;
-      legacyInFlight.set(id, legacy);
-      sendToBackground({
-        channel: 'znn',
-        kind: 'request',
-        id,
-        method: legacy.method,
-        params: message.params || {},
-      });
-    }
-  },
-  false
-);
-
-//
-// Background -> page
-//
-chrome.runtime.onMessage.addListener((message) => {
-  if (!message || message.channel !== 'znn') {
-    return false;
-  }
-
-  if (message.kind === 'response') {
-    const waiter = valueWaiters.get(message.id);
-
-    if (waiter) {
-      valueWaiters.delete(message.id);
-      clearTimeout(waiter.timer);
-      waiter.resolve(message.error ? null : message.result);
-      return false;
-    }
-
-    const legacy = legacyInFlight.get(message.id);
-
-    if (legacy) {
-      legacyInFlight.delete(message.id);
-      const payload = message.error ? legacy.onError(message.error) : legacy.onSuccess(message.result);
-      decorateLegacyGrant(payload).then(postToPage);
-      return false;
-    }
-
-    postToPage({
-      target: inpageTarget,
-      kind: 'response',
-      id: message.id,
-      result: message.result,
-      error: message.error,
+const sendToBackground = (message, requestToken) => {
+  try {
+    chrome.runtime.sendMessage(message, response => {
+      const failure = chrome.runtime.lastError;
+      if (requestToken && (failure || response?.accepted !== true)) {
+        settle(requestToken, { error: response?.error || transportError(failure?.message || 'The wallet did not accept the request. Reload the page.') });
+      }
     });
-    return false;
+  } catch (error) {
+    if (requestToken) settle(requestToken, { error: transportError('The wallet connection ended. Reload the page.') });
   }
+};
+const begin = (entry) => {
+  lifetime.check();
+  if (!active || (entry.activation && entry.activation !== activation)) {
+    entry.resolve?.(null);
+    return;
+  }
+  const requestToken = privateToken();
+  const current = { ...entry, activation };
+  outstanding.set(requestToken, current);
+  const timeout = entry.kind === 'value' ? 10000 : approvalMethods.has(entry.method) ? null : 30000;
+  if (timeout) current.timer = setTimeout(() => settle(requestToken, { error: transportError('The wallet did not respond') }), timeout);
+  sendToBackground({ channel: 'znn', kind: 'request', id: entry.id, method: entry.method,
+    params: entry.params, activation, requestToken }, requestToken);
+};
+const requestValue = (method, expectedActivation) => new Promise(resolve => {
+  legacyCounter += 1;
+  begin({ id: `znn-cs-${legacyCounter}`, kind: 'value', method, params: {}, resolve, activation: expectedActivation });
+});
+const publishLegacy = async (entry, message) => {
+  let payload = message.error ? entry.legacy.onError(message.error) : entry.legacy.onSuccess(message.result);
+  if (payload.method === 'znn.grantedWalletRead') {
+    const [chainId, nodeUrl] = await Promise.all([
+      requestValue('znn_chainId', entry.activation), requestValue('znn_nodeUrl', entry.activation),
+    ]);
+    payload = { ...payload, data: { ...payload.data, chainId, nodeUrl } };
+  }
+  if (active && activation === entry.activation) postToPage(payload);
+};
+const settle = (requestToken, message) => {
+  const entry = outstanding.get(requestToken);
+  if (!active || !entry || entry.activation !== activation) return false;
+  outstanding.delete(requestToken);
+  clearTimeout(entry.timer);
+  if (entry.kind === 'value') entry.resolve(message.error ? null : message.result);
+  else if (entry.kind === 'legacy') publishLegacy(entry, message).catch(() => {});
+  else postToPage({ target: inpageTarget, kind: 'response', id: entry.id, result: message.result, error: message.error });
+  return true;
+};
 
-  if (message.kind === 'event') {
+const receivePageMessage = event => {
+  lifetime.check();
+  if (!active || event.source !== window || !event.data || typeof event.data !== 'object') return;
+  const message = event.data;
+  if (message.target === contentTarget && message.kind === 'request') {
+    begin({ kind: 'modern', id: message.id, method: message.method, params: message.params });
+    return;
+  }
+  const legacy = Object.hasOwn(legacyRequests, message.method) ? legacyRequests[message.method] : null;
+  if (legacy) {
+    legacyCounter += 1;
+    begin({ kind: 'legacy', id: `znn-legacy-${privateToken()}`, legacy, method: legacy.method, params: message.params || {} });
+  }
+};
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  lifetime.check();
+  if (sender.id !== chrome.runtime.id || !message || message.channel !== 'znn') return false;
+  const current = active && message.activation === activation;
+  let accepted = false;
+  if (message.kind === 'probe') {
+    const entry = outstanding.get(message.requestToken);
+    accepted = current && (!message.requireRequest || Boolean(entry && entry.activation === activation));
+  } else if (current && message.kind === 'response') {
+    // No unmatched response reaches either page protocol, even if its public
+    // correlation ID happens to match a request in a replacement document.
+    accepted = settle(message.requestToken, message);
+  } else if (current && message.kind === 'event') {
     postToPage({ target: inpageTarget, kind: 'event', event: message.event, data: message.data });
-
-    // The same events under the names the old bridge published them by.
     const legacyEvents = {
-      accountsChanged: () => ({
-        method: 'znn.addressChanged',
-        data: { newAddress: message.data?.[0] || null },
-      }),
+      accountsChanged: () => ({ method: 'znn.addressChanged', data: { newAddress: message.data?.[0] || null } }),
       chainChanged: () => ({ method: 'znn.chainIdChanged', data: { newChainId: message.data } }),
       nodeChanged: () => ({ method: 'znn.nodeChanged', data: { newNode: message.data } }),
     };
-    const asLegacy = legacyEvents[message.event];
-
-    if (asLegacy) {
-      postToPage(asLegacy());
-    }
-    return false;
+    if (Object.hasOwn(legacyEvents, message.event)) postToPage(legacyEvents[message.event]());
+    accepted = true;
   }
-
+  sendResponse({ accepted });
   return false;
 });
+
+const leave = () => {
+  const departed = activation;
+  active = false;
+  for (const entry of outstanding.values()) {
+    clearTimeout(entry.timer);
+    if (entry.kind === 'value') entry.resolve(null);
+  }
+  outstanding.clear();
+  sendToBackground({ channel: 'znn', kind: 'bye', activation: departed });
+};
+const enter = event => {
+  if (!document.documentElement) return;
+  if (event.persisted || !active) activation = privateToken();
+  active = true;
+  sendToBackground({ channel: 'znn', kind: 'hello', activation });
+};
+const listen = window.addEventListener.bind(window);
+const lifetime = observeDocumentLifetime({
+  onHide: leave, onShow: enter,
+  onReset: () => { leave(); enter({ persisted: true }); },
+  install: () => listen('message', receivePageMessage),
+});
+sendToBackground({ channel: 'znn', kind: 'hello', activation });

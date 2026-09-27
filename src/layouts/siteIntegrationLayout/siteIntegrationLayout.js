@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useSelector } from 'react-redux';
 import { Primitives, Zenon, utils as sdkUtils } from 'znn-ts-sdk';
@@ -8,6 +8,7 @@ import useBlockSender from '../../services/hooks/useBlockSender';
 import vault from '../../services/wallet/vault';
 import { signMessage } from '../../services/wallet/signMessage';
 import { sendInternal } from '../../services/utils/messaging';
+import { bindingOf, sameRequest, requestEnded } from '../../services/utils/documentBinding';
 import {
   formatAmount,
   formatExact,
@@ -116,6 +117,25 @@ const SiteIntegrationLayout = () => {
   const [preview, setPreview] = useState(null);
   const [isBusy, setIsBusy] = useState(false);
   const [isWaitingForMore, setIsWaitingForMore] = useState(false);
+  const requestRef = useRef(undefined);
+  const busyRef = useRef(null);
+  const latestOperation = useRef(null);
+  const mounted = useRef(true);
+  const loadTicket = useRef(0);
+  const selectRequest = useCallback(next => {
+    if (!sameRequest(requestRef.current, next)) {
+      busyRef.current = null;
+      setIsBusy(false);
+      setPreview(null);
+    }
+    requestRef.current = next;
+    setRequest(next);
+  }, []);
+  useEffect(() => {
+    mounted.current = true;
+    const tickets = loadTicket;
+    return () => { mounted.current = false; tickets.current++; busyRef.current = null; requestRef.current = null; };
+  }, []);
 
   // A locked wallet cannot answer anything. The password screen is told where
   // to come back to so the request is not lost.
@@ -144,42 +164,42 @@ const SiteIntegrationLayout = () => {
   const CLOSE_GRACE_MS = 1200;
 
   const loadNext = useCallback(async () => {
+    const ticket = ++loadTicket.current;
+    const current = () => mounted.current && ticket === loadTicket.current;
     try {
       const next = await sendInternal('approvals.next');
-
-      if (next) {
-        setRequest(next);
-        return next;
-      }
-      setRequest(null);
-      setIsWaitingForMore(true);
-      await new Promise((resolve) => {
-        setTimeout(resolve, CLOSE_GRACE_MS);
-      });
-
+      if (!current()) return null;
+      selectRequest(next);
+      setIsWaitingForMore(!next);
+      if (next) return next;
+      await new Promise(resolve => { setTimeout(resolve, CLOSE_GRACE_MS); });
+      if (!current()) return null;
       const late = await sendInternal('approvals.next');
+      if (!current()) return null;
+      selectRequest(late);
       setIsWaitingForMore(false);
-
-      if (late) {
-        setRequest(late);
-        return late;
-      }
-      // Nothing left to answer means this window was only ever open for the
-      // queue, and the queue is empty.
+      if (late) return late;
       window.close();
       return null;
-    } catch (err) {
-      setIsWaitingForMore(false);
-      setRequest(null);
+    } catch (error) {
+      if (current()) { selectRequest(null); setIsWaitingForMore(false); }
       return null;
     }
-  }, []);
+  }, [selectRequest]);
 
   useEffect(() => {
-    if (isUnlocked) {
+    if (!isUnlocked) return undefined;
+    loadNext();
+    const changed = (changes, area) => {
+      if (area !== 'session' || !changes['znn.pendingRequests']) return;
+      const shown = requestRef.current;
+      const stored = changes['znn.pendingRequests'].newValue;
+      if (shown && !sameRequest(stored?.[shown.id], shown)) selectRequest(null);
       loadNext();
-    }
-  }, [isUnlocked, loadNext]);
+    };
+    chrome.storage.onChanged.addListener(changed);
+    return () => chrome.storage.onChanged.removeListener(changed);
+  }, [isUnlocked, loadNext, selectRequest]);
 
   // For an arbitrary account block, what will actually be signed — with the
   // fields the SDK fills in (chain, height, previous hash) resolved, rather
@@ -204,11 +224,11 @@ const SiteIntegrationLayout = () => {
           keyPair
         );
 
-        if (!cancelled) {
+        if (!cancelled && mounted.current && sameRequest(requestRef.current, request)) {
           setPreview(filled.toJson());
         }
       } catch (err) {
-        if (!cancelled) {
+        if (!cancelled && mounted.current && sameRequest(requestRef.current, request)) {
           // Falling back to what the site sent is better than a blank panel:
           // the point of this screen is that the block is visible before it is
           // signed.
@@ -222,118 +242,73 @@ const SiteIntegrationLayout = () => {
     };
   }, [request]);
 
-  const finish = async (id, result, grantOrigin = false) => {
-    await sendInternal('approvals.resolve', { id, result, grantOrigin });
-    await loadNext();
+  const runApproval = async (action, { grantOrigin = false, success } = {}) => {
+    const shown = request;
+    if (busyRef.current || !sameRequest(requestRef.current, shown)) return;
+    const operation = { request: shown, binding: bindingOf(shown) };
+    latestOperation.current = operation;
+    busyRef.current = operation;
+    setIsBusy(true);
+    const current = () => mounted.current && busyRef.current === operation && sameRequest(requestRef.current, shown);
+    const assertRequest = async () => {
+      if (!current()) throw requestEnded();
+      if (!(await sendInternal('approvals.current', { binding: operation.binding })) || !current()) throw requestEnded();
+    };
+    try {
+      await assertRequest();
+      const result = await action({ request: shown, assertRequest });
+      await assertRequest();
+      if (!(await sendInternal('approvals.resolve', { binding: operation.binding, result, grantOrigin }, { timeoutMs: 20000 }))) throw requestEnded();
+      if (success && mounted.current && latestOperation.current === operation &&
+          (!requestRef.current || sameRequest(requestRef.current, shown))) notify.success(success);
+    } catch (error) {
+      if (current()) notify.error(error);
+      await sendInternal('approvals.reject', {
+        binding: operation.binding, error: { code: -32603, message: readableError(error) },
+      }).catch(() => {});
+    } finally {
+      // Queue changes can already have selected another request or started a
+      // newer operation. An older completion owns neither of those states.
+      if (busyRef.current === operation) {
+        busyRef.current = null;
+        if (mounted.current) { setIsBusy(false); await loadNext(); }
+      }
+    }
   };
 
   const reject = async () => {
-    if (!request) {
-      return;
-    }
-    await sendInternal('approvals.reject', { id: request.id });
-    await loadNext();
-  };
-
-  //
-  // Connect
-  //
-  const approveConnect = async () => {
-    setIsBusy(true);
-    try {
-      await finish(request.id, [address], true);
-    } finally {
-      setIsBusy(false);
+    const shown = request;
+    if (busyRef.current || !sameRequest(requestRef.current, shown)) return;
+    const operation = { request: shown };
+    latestOperation.current = operation;
+    busyRef.current = operation; setIsBusy(true);
+    try { await sendInternal('approvals.reject', { binding: bindingOf(shown) }); }
+    catch (error) { if (mounted.current) notify.error(error); }
+    finally {
+      if (busyRef.current === operation) {
+        busyRef.current = null;
+        if (mounted.current) { setIsBusy(false); await loadNext(); }
+      }
     }
   };
 
-  //
-  // Send a plain transfer
-  //
-  const tokenFor = (tokenStandard) => balanceMap[tokenStandard];
-
-  const approveSendTransaction = async () => {
-    setIsBusy(true);
-
-    try {
-      const { to, tokenStandard, amount } = request.params;
-      const template = Primitives.AccountBlockTemplate.send(
-        Primitives.Address.parse(to),
-        Primitives.TokenStandard.parse(tokenStandard),
-        amount
-      );
-      const signed = await send(template);
-
-      await finish(request.id, {
-        hash: signed.hash?.toString(),
-        block: signed.toJson?.() ?? null,
-      });
-      notify.success('Transaction sent');
-    } catch (err) {
-      notify.error(err);
-      await sendInternal('approvals.reject', {
-        id: request.id,
-        error: { code: -32603, message: readableError(err) },
-      });
-      await loadNext();
-    } finally {
-      setIsBusy(false);
-    }
-  };
-
-  //
-  // Sign a message
-  //
-  // The only approval here that does not touch the network: no plasma, no
-  // block, nothing to broadcast. It is over as fast as an Ed25519 signature,
-  // and the site gets the answer the moment the button is pressed.
-  //
-  const approveSignMessage = async () => {
-    setIsBusy(true);
-
-    try {
-      const signed = await signMessage(request.params.message);
-
-      await finish(request.id, signed);
-      notify.success('Message signed');
-    } catch (err) {
-      notify.error(err);
-      await sendInternal('approvals.reject', {
-        id: request.id,
-        error: { code: -32603, message: readableError(err) },
-      });
-      await loadNext();
-    } finally {
-      setIsBusy(false);
-    }
-  };
-
-  //
-  // Sign and send an arbitrary block
-  //
-  const approveSignAndSend = async () => {
-    setIsBusy(true);
-
-    try {
-      const template = Primitives.AccountBlockTemplate.fromJson(request.params);
-      const signed = await send(template);
-
-      await finish(request.id, {
-        hash: signed.hash?.toString(),
-        block: signed.toJson?.() ?? null,
-      });
-      notify.success('Block sent');
-    } catch (err) {
-      notify.error(err);
-      await sendInternal('approvals.reject', {
-        id: request.id,
-        error: { code: -32603, message: readableError(err) },
-      });
-      await loadNext();
-    } finally {
-      setIsBusy(false);
-    }
-  };
+  const approveConnect = () => runApproval(async () => [address], { grantOrigin: true });
+  const tokenFor = tokenStandard => balanceMap[tokenStandard];
+  const approveSendTransaction = () => runApproval(async ({ request: captured, assertRequest }) => {
+    const { to, tokenStandard, amount } = captured.params;
+    const template = Primitives.AccountBlockTemplate.send(
+      Primitives.Address.parse(to), Primitives.TokenStandard.parse(tokenStandard), amount
+    );
+    const signed = await send(template, { assertRequest });
+    return { hash: signed.hash?.toString(), block: signed.toJson?.() ?? null };
+  }, { success: 'Transaction sent' });
+  const approveSignMessage = () => runApproval(({ request: captured, assertRequest }) =>
+    signMessage(captured.params.message, { assertRequest }), { success: 'Message signed' });
+  const approveSignAndSend = () => runApproval(async ({ request: captured, assertRequest }) => {
+    const template = Primitives.AccountBlockTemplate.fromJson(captured.params);
+    const signed = await send(template, { assertRequest });
+    return { hash: signed.hash?.toString(), block: signed.toJson?.() ?? null };
+  }, { success: 'Block sent' });
 
   if (request === undefined) {
     return (
@@ -356,7 +331,7 @@ const SiteIntegrationLayout = () => {
     );
   }
 
-  const busy = isBusy || isSending;
+  const busy = isBusy || (isSending && Boolean(busyRef.current));
   // The site is blocked on the signed block, so this screen is the one place
   // that still waits — but it waits in place, on its own button, rather than
   // behind a modal that hides what is being approved.

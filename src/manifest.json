@@ -1,6 +1,7 @@
 {
   "version": "0.3.3",
   "manifest_version": 3,
+  "minimum_chrome_version": "111",
   "name": "Syrius — Zenon Wallet",
   "description": "A non-custodial wallet for Zenon, Network of Momentum, that runs in the browser.",
   "background": {
@@ -29,7 +30,7 @@
     "default_title": "Syrius",
     "default_popup": "popup.html"
   },
-  "permissions": ["storage", "alarms"],
+  "permissions": ["storage", "alarms", "webNavigation"],
   "icons": {
     "128": "icon-128.png"
   },

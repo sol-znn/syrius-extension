@@ -13,23 +13,13 @@
 
 const storageKey = 'syrius.permissions';
 
-const readAll = async () => {
-  try {
-    const stored = await chrome.storage.local.get(storageKey);
-    return stored[storageKey] || {};
-  } catch (err) {
-    return {};
-  }
-};
-
-const writeAll = async (permissions) => {
-  try {
-    await chrome.storage.local.set({ [storageKey]: permissions });
-    return true;
-  } catch (err) {
-    return false;
-  }
-};
+// A provisional grant is never new authority, including after worker restart.
+// A prior completed grant remains valid if an attempted reconnection is canceled.
+const activeEntry = entry => entry?.pendingApproval ? entry.previous || null : entry || null;
+const own = (all, origin) => Object.hasOwn(all, origin) ? all[origin] : null;
+const serialized = operation => navigator.locks.request(storageKey, operation);
+const readAll = async () => (await chrome.storage.local.get(storageKey))[storageKey] || {};
+const writeAll = all => chrome.storage.local.set({ [storageKey]: all });
 
 // A page can claim to be any origin it likes in a postMessage, so the origin
 // used for a permission decision is always the one Chrome reports for the
@@ -45,51 +35,53 @@ const originOf = (sender) => {
   }
 };
 
-const isConnected = async (origin) => {
-  if (!origin) {
+const isConnected = origin => serialized(async () =>
+  Boolean(origin && activeEntry(own(await readAll(), origin)))
+);
+const get = origin => serialized(async () => activeEntry(own(await readAll(), origin)));
+const list = () => serialized(async () => Object.values(await readAll()).map(activeEntry)
+  .filter(Boolean).sort((a, b) => (b.connectedAt || 0) - (a.connectedAt || 0)));
+
+const grant = (origin, { title = '', favicon = '' } = {}, { binding, confirm } = {}) => serialized(async () => {
+  if (!origin || !binding || typeof confirm !== 'function') return false;
+  const all = await readAll();
+  const previous = activeEntry(own(all, origin));
+  const completed = { origin, title, favicon, connectedAt: previous?.connectedAt || Date.now(), lastUsedAt: Date.now() };
+  const provisional = { pendingApproval: { ...binding }, previous };
+  await writeAll({ ...all, [origin]: provisional });
+  let accepted;
+  try {
+    // The exact relay consumes its outstanding token synchronously with its
+    // response acknowledgement. pagehide clears the same token synchronously:
+    // cancellation before acceptance wins; a later navigation is after consent.
+    accepted = await confirm();
+  } catch (error) {
+    await writeAll(all).catch(() => {}); // A stranded provisional stays inactive.
+    throw error;
+  }
+  if (!accepted) {
+    await writeAll(all).catch(() => {});
     return false;
   }
-  const all = await readAll();
-  return Boolean(all[origin]);
-};
+  // The original document has accepted the completed connection. Readers wait
+  // on this lock, so its immediate follow-up sees the persisted outcome. A
+  // failed final write leaves only an inactive provisional (or prior consent).
+  await writeAll({ ...all, [origin]: completed });
+  return true;
+});
 
-const get = async (origin) => (await readAll())[origin] || null;
-
-const list = async () => {
-  const all = await readAll();
-  return Object.values(all).sort((a, b) => (b.connectedAt || 0) - (a.connectedAt || 0));
-};
-
-const grant = async (origin, { title = '', favicon = '' } = {}) => {
-  if (!origin) {
-    return false;
-  }
-  const all = await readAll();
-  all[origin] = {
-    origin,
-    title,
-    favicon,
-    connectedAt: all[origin]?.connectedAt || Date.now(),
-    lastUsedAt: Date.now(),
-  };
-  return writeAll(all);
-};
-
-const revoke = async (origin) => {
+const revoke = origin => serialized(async () => {
   const all = await readAll();
   delete all[origin];
-  return writeAll(all);
-};
-
-const revokeAll = async () => writeAll({});
-
-const touch = async (origin) => {
+  await writeAll(all);
+  return true;
+});
+const revokeAll = () => serialized(async () => { await writeAll({}); return true; });
+const touch = origin => serialized(async () => {
   const all = await readAll();
-  if (all[origin]) {
-    all[origin].lastUsedAt = Date.now();
-    await writeAll(all);
-  }
-};
+  const entry = activeEntry(own(all, origin));
+  if (entry) { entry.lastUsedAt = Date.now(); await writeAll(all); }
+});
 
 const permissions = { storageKey, originOf, isConnected, get, list, grant, revoke, revokeAll, touch };
 

@@ -1,3 +1,5 @@
+import { validRequest, sameRequest, sameDocument, isLive, requestEnded } from '../../services/utils/documentBinding';
+
 // The queue of things a site has asked for and a person has not answered yet.
 //
 // Two constraints shape this. A manifest v3 service worker is unloaded when
@@ -14,44 +16,67 @@ const pendingKey = 'znn.pendingRequests';
 const windowKey = 'znn.approvalWindowId';
 
 const readPending = async () => {
-  try {
-    const stored = await chrome.storage.session.get(pendingKey);
-    return stored[pendingKey] || {};
-  } catch (err) {
-    return {};
-  }
+  const stored = await chrome.storage.session.get(pendingKey);
+  return stored[pendingKey] || {};
 };
-
-const writePending = async (pending) => {
-  try {
-    await chrome.storage.session.set({ [pendingKey]: pending });
-  } catch (err) {
-    // If session storage is unavailable the request cannot be tracked; the
-    // caller's timeout is what recovers it.
-  }
-};
-
-const list = async () => {
-  const pending = await readPending();
-  return Object.values(pending).sort((a, b) => a.createdAt - b.createdAt);
-};
-
-const oldest = async () => (await list())[0] || null;
-
-const get = async (id) => (await readPending())[id] || null;
-
-const add = async (request) => {
-  const pending = await readPending();
-  pending[request.id] = request;
-  await writePending(pending);
-};
-
-const remove = async (id) => {
-  const pending = await readPending();
-  const request = pending[id];
+const writePending = pending => chrome.storage.session.set({ [pendingKey]: pending });
+const own = (pending, id) => Object.hasOwn(pending, id) ? pending[id] : null;
+const serialized = operation => navigator.locks.request(pendingKey, async () => operation(await readPending()));
+const list = async () => Object.values(await readPending()).sort((a, b) => a.createdAt - b.createdAt);
+const get = async id => own(await readPending(), id);
+const add = request => serialized(async pending => {
+  if (!validRequest(request)) throw requestEnded();
+  await writePending({ ...pending, [request.id]: request });
+});
+const remove = (id, expected) => serialized(async pending => {
+  const request = own(pending, id);
+  if (!sameRequest(request, expected)) return null;
   delete pending[id];
   await writePending(pending);
-  return request || null;
+  return request;
+});
+const removeWhere = predicate => serialized(async pending => {
+  const removed = Object.values(pending).filter(predicate);
+  for (const request of removed) delete pending[request.id];
+  if (removed.length) await writePending(pending);
+  return removed;
+});
+const cancelDocument = target => removeWhere(request => sameDocument(request, target));
+const cancelTab = tabId => removeWhere(request => request.tabId === tabId);
+const pruneUnbound = () => serialized(async pending => {
+  let changed = false;
+  for (const id of Object.keys(pending)) {
+    if (!validRequest(pending[id])) { delete pending[id]; changed = true; }
+  }
+  if (changed) await writePending(pending);
+});
+const current = async expected => {
+  let request = await get(expected?.id);
+  if (!sameRequest(request, expected)) return null;
+  if (!(await isLive(request, true))) {
+    await remove(request.id, request);
+    return null;
+  }
+  // Navigation, a bye, or replacement can commit while the probe is pending.
+  request = await get(expected.id);
+  return sameRequest(request, expected) ? request : null;
+};
+const listCurrent = async () => {
+  await pruneUnbound();
+  const result = [];
+  for (const request of await list()) {
+    const active = await current(request);
+    if (active) result.push(active);
+  }
+  return result;
+};
+const oldest = async () => {
+  await pruneUnbound();
+  for (const request of await list()) {
+    const active = await current(request);
+    if (active) return active;
+  }
+  return null;
 };
 
 // Records which approval window a request was actually put in front of.
@@ -70,16 +95,12 @@ const remove = async (id) => {
 // A request that has not been stamped yet is deliberately left alone by that
 // handler. It is the safe direction: an unstamped request waits for a window of
 // its own, where the worst case is a prompt the person can decline themselves.
-const attachWindow = async (id, windowId) => {
-  const pending = await readPending();
-
-  if (!pending[id]) {
-    return false;
-  }
+const attachWindow = (id, windowId, expected) => serialized(async pending => {
+  if (!sameRequest(own(pending, id), expected)) return false;
   pending[id].windowId = windowId;
   await writePending(pending);
   return true;
-};
+});
 
 //
 // The approval window
@@ -184,6 +205,11 @@ const requests = {
   pendingKey,
   windowKey,
   list,
+  listCurrent,
+  current,
+  cancelDocument,
+  removeWhere,
+  cancelTab,
   oldest,
   get,
   add,

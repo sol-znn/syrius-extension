@@ -1,3 +1,5 @@
+import observeDocumentLifetime from '../../services/utils/documentLifetime';
+
 // The wallet as a page sees it: `window.zenon`.
 //
 // This file runs in the page's own world, injected by the browser rather than
@@ -26,6 +28,7 @@
   const pending = new Map();
   const listeners = new Map();
   let requestCounter = 0;
+  let active = Boolean(document.documentElement);
 
   const nextId = () => {
     requestCounter += 1;
@@ -39,6 +42,8 @@
 
   const request = ({ method, params }) =>
     new Promise((resolve, reject) => {
+      lifetime.check();
+      if (!active) { reject({ code: 4900, message: 'This document is no longer active. Make a new request after returning.' }); return; }
       const id = nextId();
       const needsApproval = method !== 'znn_accounts' && method !== 'znn_chainId' && method !== 'znn_nodeUrl';
 
@@ -69,7 +74,8 @@
     });
   };
 
-  window.addEventListener('message', (event) => {
+  const receiveMessage = (event) => {
+    lifetime.check();
     // Only messages this window posted to itself. Anything from a frame or
     // another origin is not the content script.
     if (event.source !== window) {
@@ -108,7 +114,7 @@
       }
       emit(message.event, message.data);
     }
-  });
+  };
 
   const provider = {
     // Kept from the old shape so anything that sniffed for it still works.
@@ -193,6 +199,25 @@
       return provider;
     },
   };
+
+  // Reject actual provider promises synchronously when leaving. A posted
+  // cancellation message could itself wait in the BFCache task queue.
+  const leave = () => {
+    active = false;
+    for (const waiting of pending.values()) {
+      clearTimeout(waiting.timer);
+      waiting.reject({ code: 4900, message: 'The page left before this request completed. Make a new request after returning.' });
+    }
+    pending.clear();
+    provider.accounts = [];
+    provider.chainId = null;
+  };
+  const enter = () => { active = Boolean(document.documentElement); };
+  const listen = window.addEventListener.bind(window);
+  const lifetime = observeDocumentLifetime({
+    onHide: leave, onShow: enter, onReset: () => { leave(); enter(); },
+    install: () => listen('message', receiveMessage),
+  });
 
   // A page that loaded before the wallet did gets told, rather than having to
   // poll for `window.zenon`.
