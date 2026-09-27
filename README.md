@@ -180,6 +180,11 @@ unpacked extension.
 
 ## Integrating a site
 
+The extension requires Chrome 111 or a compatible Chromium version. Pending
+approvals use extension-generated single-use identities, separate from site response
+IDs, and are bound to the native requesting document. Existing pending requests
+from older extension versions must be submitted again after an update.
+
 The extension injects `window.zenon` into every page, before the page's own
 scripts run. It exposes nothing about the wallet until the person approves the
 origin, and it never signs anything without asking.

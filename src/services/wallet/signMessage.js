@@ -1,4 +1,5 @@
 import vault from './vault';
+import requestSigningKey from './requestSigningKey';
 
 // Signing a message with the account's key, rather than signing a block with it.
 //
@@ -71,22 +72,25 @@ const messageProblem = (message) => {
 // Signs with the selected address unless told otherwise. A site never gets to
 // choose the address: it asked the wallet to sign, and the wallet signs as
 // whoever the person has selected.
-const signMessage = async (message, { addressIndex } = {}) => {
+const signMessage = async (message, { addressIndex, assertRequest } = {}) => {
   const problem = messageProblem(message);
 
   if (problem) {
     throw new Error(problem);
   }
-  const keyPair = await vault.getSigningKeyPair(addressIndex);
+  await assertRequest?.();
+  const keyPair = requestSigningKey(await vault.getSigningKeyPair(addressIndex), assertRequest);
+  await assertRequest?.();
   const [signature, publicKey, address] = await Promise.all([
     keyPair.sign(encodeMessage(message)),
     keyPair.getPublicKey(),
-    vault.getAddress(addressIndex),
+    keyPair.getAddress(),
   ]);
 
+  await assertRequest?.();
   return {
     message,
-    address,
+    address: address.toString(),
     publicKey: bytesToHex(publicKey),
     signature: bytesToHex(signature),
   };

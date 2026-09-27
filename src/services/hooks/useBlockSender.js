@@ -2,6 +2,7 @@ import { useCallback, useState } from 'react';
 import { Enums, Zenon } from 'znn-ts-sdk';
 
 import vault from '../wallet/vault';
+import requestSigningKey from '../wallet/requestSigningKey';
 import { invalidateAccountCache } from './useAccount';
 
 // Signing and broadcasting one account block, for the one caller that has to
@@ -28,9 +29,11 @@ const useBlockSender = () => {
   const [isSending, setIsSending] = useState(false);
   const [isGeneratingPlasma, setIsGeneratingPlasma] = useState(false);
 
-  const send = useCallback(async (template, { addressIndex } = {}) => {
+  const send = useCallback(async (template, { addressIndex, assertRequest } = {}) => {
     const zenon = Zenon.getSingleton();
-    const keyPair = await vault.getSigningKeyPair(addressIndex);
+    await assertRequest?.();
+    const keyPair = requestSigningKey(await vault.getSigningKeyPair(addressIndex), assertRequest);
+    await assertRequest?.();
 
     setIsSending(true);
 
@@ -48,6 +51,7 @@ const useBlockSender = () => {
 
       // The balance on screen is now stale by definition.
       invalidateAccountCache();
+      await assertRequest?.();
       return signed;
     } finally {
       // In `finally`, so an error cannot leave the screen saying it is working.

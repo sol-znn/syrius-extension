@@ -1,6 +1,7 @@
 import frames from './frames';
 import permissions from './permissions';
 import requests from './requests';
+import { identityOf } from '../../services/utils/approvalIdentity';
 
 // The service worker.
 //
@@ -31,6 +32,7 @@ const maxSignMessageLength = 8192;
 //
 const errors = {
   userRejected: { code: 4001, message: 'User rejected the request' },
+  approvalInterrupted: { code: -32603, message: 'Approval window closed after approval began. The outcome is unknown; verify the result before retrying.' },
   unauthorized: { code: 4100, message: 'The site is not connected to this wallet' },
   unsupportedMethod: { code: 4200, message: 'Unsupported method' },
   disconnected: { code: 4900, message: 'The wallet is locked' },
@@ -91,17 +93,19 @@ const getPublicState = async () => {
 //
 // Talking back to pages
 //
-const sendToTab = async (tabId, message, frameId) => {
+const sendToTab = async (tabId, message, frameId, documentId) => {
   try {
-    await chrome.tabs.sendMessage(tabId, message, frameId === undefined ? {} : { frameId });
+    await chrome.tabs.sendMessage(tabId, message, { ...(frameId === undefined ? {} : { frameId }), ...(documentId ? { documentId } : {}) });
   } catch (err) {
     // The tab navigated away or closed. Nothing to deliver to and nothing to
     // do about it.
   }
 };
 
-const respond = (target, id, result, error) =>
-  sendToTab(target.tabId, { channel: 'znn', kind: 'response', id, result, error }, target.frameId);
+const respond = (target, id, result, error) => {
+  if (typeof target.documentId !== 'string' || !target.documentId) return false;
+  return sendToTab(target.tabId, { channel: 'znn', kind: 'response', id, result, error }, target.frameId, target.documentId);
+};
 
 // Fans an event out to every frame whose origin is connected, so a site sees
 // an address or chain change without polling.
@@ -125,23 +129,25 @@ const broadcast = async (event, data) => {
 // Queuing something for a person to approve
 //
 const queueApproval = async (type, { id, target, origin, sender, params }) => {
-  await requests.add({
-    id,
+  const queued = await requests.add({
+    responseId: id,
     type,
     params: params || {},
     origin,
     tabId: target.tabId,
     frameId: target.frameId,
+    documentId: target.documentId,
     title: sender.tab?.title || '',
     favicon: sender.tab?.favIconUrl || '',
     createdAt: Date.now(),
   });
-  // Stamped with the window it is actually shown in, so that closing that
-  // window answers for this request and for no other. See requests.attachWindow
-  // — without it, a request queued in the gap between one window closing and
-  // the next opening was rejected as "user rejected" without ever being drawn.
-  const windowId = await requests.openApprovalWindow();
-  await requests.attachWindow(id, windowId);
+  const identity = identityOf(queued);
+  try {
+    if (!(await requests.present(identity))) throw new Error('The approval window is no longer available.');
+  } catch (error) {
+    await requests.reject(identity);
+    throw error;
+  }
 };
 
 //
@@ -230,10 +236,10 @@ const providerMethods = {
 
 const handleProviderRequest = async (request, sender) => {
   const origin = permissions.originOf(sender);
-  const target = { tabId: sender.tab.id, frameId: sender.frameId ?? 0 };
+  const target = { tabId: sender.tab.id, frameId: sender.frameId ?? 0, documentId: sender.documentId };
   const { id, method, params } = request;
 
-  if (!origin) {
+  if (!origin || typeof target.documentId !== 'string' || !target.documentId) {
     await respond(target, id, undefined, errors.internal);
     return;
   }
@@ -271,26 +277,28 @@ const internalMethods = {
   'approvals.list': () => requests.list(),
   'approvals.next': () => requests.oldest(),
 
-  'approvals.resolve': async ({ id, result, grantOrigin }) => {
-    const request = await requests.remove(id);
-
-    if (!request) {
-      return false;
+  'approvals.claim': ({ identity, windowId }) => requests.claim(identity, windowId),
+  'approvals.checkClaim': ({ identity }) => requests.checkClaim(identity),
+  'approvals.resolve': async ({ identity, result }) => {
+    const request = await requests.resolve(identity);
+    if (!request) return false;
+    if (request.type === 'connect') {
+      try {
+        if (!(await permissions.grant(request.origin, { title: request.title, favicon: request.favicon }))) {
+          throw new Error('The connection permission could not be saved.');
+        }
+      } catch (error) {
+        await respond(request, request.responseId, undefined, { ...errors.internal, message: error.message });
+        return false;
+      }
     }
-    if (grantOrigin) {
-      await permissions.grant(request.origin, { title: request.title, favicon: request.favicon });
-    }
-    await respond(request, id, result);
+    await respond(request, request.responseId, result);
     return true;
   },
-
-  'approvals.reject': async ({ id, error }) => {
-    const request = await requests.remove(id);
-
-    if (!request) {
-      return false;
-    }
-    await respond(request, id, undefined, error || errors.userRejected);
+  'approvals.reject': async ({ identity, error }) => {
+    const request = await requests.reject(identity);
+    if (!request) return false;
+    await respond(request, request.responseId, undefined, error || errors.userRejected);
     return true;
   },
 
@@ -400,20 +408,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 // prompt that never appeared, and it did so every time, on the first attempt,
 // for exactly the connect-then-sign shape every site uses.
 chrome.windows.onRemoved.addListener(async (windowId) => {
-  // Snapshotted before anything is awaited on the window itself, so a request
-  // queued during this handler is not in the list it answers for.
-  const pending = await requests.list();
-  const abandoned = pending.filter((request) => request.windowId === windowId);
-
-  // Compare-and-clear: a replacement window may already have claimed the slot.
-  await requests.forgetWindow(windowId);
-
-  await Promise.all(
-    abandoned.map(async (request) => {
-      await requests.remove(request.id);
-      await respond(request, request.id, undefined, errors.userRejected);
-    })
-  );
+  try {
+    const abandoned = await requests.closeWindow(windowId);
+    // A claimed operation may already have reached publication. Closing its
+    // window cannot promise cancellation or invite an automatic retry.
+    await Promise.all(abandoned.map(request => respond(request, request.responseId, undefined,
+      request.claimId ? errors.approvalInterrupted : errors.userRejected)));
+  } catch (error) {
+    // Storage failure cannot be treated as a successful removal or approval.
+    console.error('Unable to close pending wallet approvals', error);
+  }
 });
 
 // A closed tab has no frames left to deliver to.
