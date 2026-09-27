@@ -1,4 +1,4 @@
-import { Zenon } from 'znn-ts-sdk';
+import { KeyStore, Zenon } from 'znn-ts-sdk';
 import {
   storeChainIdentifier,
   storeIsConnected,
@@ -15,6 +15,7 @@ import {
 import { announceUnlock } from './announce';
 import session from './session';
 import vault from './vault';
+import selection from './selection';
 
 // Everything that has to happen between "this is the right password" and "the
 // wallet is on screen", in the one order that works.
@@ -45,40 +46,37 @@ const connectToNode = async (dispatch) => {
 // resuming a session that has not expired. The entropy path skips Argon2id
 // entirely, which is the difference between a popup that opens instantly and
 // one that hangs for a second every time.
-const completeUnlock = async ({ walletName, password, entropy, dispatch }) => {
-  if (entropy) {
-    vault.unlockWithEntropy(walletName, entropy);
-  } else {
-    await vault.unlockWithPassword(walletName, password);
-  }
-
-  // Recorded only once the password (or entropy) above has actually checked
-  // out — a wrong guess must never become the screen's next default.
-  setLastWalletName(walletName);
-
+const ownerId = crypto.randomUUID();
+const completeUnlock = async ({ walletName, password, unlock, dispatch, isCurrent = () => true }) => {
+  const expected = await selection.transaction(stored => selection.current(stored));
+  if (unlock && (expected?.id !== unlock.id || !selection.live(expected) || expected.mode !== 'timed')) throw selection.ended();
+  const keyStore = unlock ? new KeyStore().fromEntropy(unlock.entropy) : await vault.preparePassword(walletName, password);
   const addressInfo = getAddressInfo(walletName);
-  vault.setSelectedIndex(addressInfo.selectedAddressIndex);
-  const address = await vault.getAddress();
-
-  dispatch(
-    walletUnlocked({
-      walletName,
-      address,
-      selectedAddressIndex: addressInfo.selectedAddressIndex,
-      maxAddressIndex: addressInfo.maxAddressIndex,
-    })
-  );
-  dispatch(storeChainIdentifier(Zenon.getChainIdentifier()));
-
-  await session.save({
-    walletName,
-    entropy: vault.getEntropy(),
-    selectedAddressIndex: addressInfo.selectedAddressIndex,
+  const index = unlock ? unlock.scope.index : addressInfo.selectedAddressIndex;
+  const walletId = (await keyStore.getKeyPair(0).getAddress()).toString();
+  const address = (await keyStore.getKeyPair(index).getAddress()).toString();
+  const scope = { walletName, walletId, address, index };
+  if (unlock && !selection.sameScope(unlock.scope, scope)) throw selection.ended();
+  const binding = await selection.transaction(async stored => {
+    const current = selection.current(stored);
+    if (!isCurrent() || (current?.id ?? null) !== (expected?.id ?? null) ||
+        (unlock && (!selection.live(current) || current.mode !== 'timed'))) throw selection.ended();
+    const expiresAt = session.deadlineFromNow();
+    const next = { id: unlock ? current.id : crypto.randomUUID(), walletName, scope,
+      selectedAddressIndex: index, ownerId, lastActiveAt: Date.now(), expiresAt,
+      mode: expiresAt ? 'timed' : 'local',
+      resumeFrom: unlock ? current.resumeFrom || null : selection.sameScope(current?.scope, scope) ? current.id : null,
+      ...(expiresAt ? { entropy: keyStore.entropy } : {}) };
+    await selection.write(next);
+    vault.adopt(walletName, keyStore); vault.setSelectedIndex(index); vault.bind(next);
+    setLastWalletName(walletName);
+    dispatch(walletUnlocked({ walletName, address, selectedAddressIndex: index, maxAddressIndex: addressInfo.maxAddressIndex }));
+    dispatch(storeChainIdentifier(Zenon.getChainIdentifier()));
+    return vault.getBinding();
   });
-
   const isConnected = await connectToNode(dispatch);
-  await announceUnlock(address);
-
+  if (!isCurrent()) throw selection.ended();
+  await announceUnlock(binding);
   return { address, isConnected };
 };
 

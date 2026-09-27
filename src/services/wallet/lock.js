@@ -13,9 +13,10 @@ import vault from './vault';
 // told connected sites the address was gone, so a site kept showing an account
 // for a wallet the person believed they had just shut.
 const lockWallet = async () => {
+  const binding = vault.getBinding();
   vault.lock();
-  await session.clear();
-  await announceLock();
+  const id = await session.clear(binding?.id);
+  if (id) await announceLock(id);
   // Nothing left over from the unlocked wallet should still be on screen once
   // the password prompt is.
   notify.dismissAll();

@@ -49,14 +49,12 @@ const ChangeAddress = () => {
     if (!address) {
       return;
     }
-    setAddressInfo(walletName, { selectedAddressIndex: index, maxAddressIndex });
-    vault.setSelectedIndex(index);
-    dispatch(storeSelectedAddress({ index, address }));
-
-    // The cached balances belong to the address being left behind.
-    invalidateAccountCache();
-    await session.touch({ selectedAddressIndex: index });
-    await announceAddress(address);
+    try {
+      const changed = await session.selectAddress(index, maxAddressIndex);
+      dispatch(storeSelectedAddress({ index, address: changed.address }));
+      invalidateAccountCache();
+      await announceAddress(changed.binding);
+    } catch (error) { notify.error(error); return; }
 
     // Switching addresses repeatedly while this toast is still up reuses it
     // rather than stacking one per click, the same as `notify.copied`.

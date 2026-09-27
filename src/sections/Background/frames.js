@@ -39,6 +39,7 @@ const register = async (sender, origin) => {
     tabId: sender.tab.id,
     frameId: sender.frameId ?? 0,
     origin,
+    documentId: sender.documentId,
   };
   await writeAll(frames);
 };

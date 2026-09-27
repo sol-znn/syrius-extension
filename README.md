@@ -285,3 +285,26 @@ MIT License - see the [LICENSE](LICENSE) file for details.
 ---
 
 **Disclaimer**: This is experimental software. Use at your own risk. Always verify transactions before signing.
+
+### Wallet and account consent
+
+Site connections are stored per origin, exact wallet import, and exact derived
+account. The first derived address identifies the seed; the stored wallet name
+separates duplicate imports. Reusing a name for another seed never transfers
+consent. Older origin-only connections require reconnection. Switching A → B → A
+restores A's saved consent, but never revives an approval shown before a switch.
+The approval screen shows the wallet, account number, and full address. Signing
+and publication check that same selection and use its explicit address index.
+
+On close keeps public reads empty and stores no resumable entropy. A connected
+site may queue a request for the known account and wait for that account's next
+immediate unlock; an unknown or changed account is refused. Once displayed, the
+request cannot rebind. Timed session reopening preserves the selection identity.
+Connected sites lists each wallet/account grant; its Disconnect all button covers
+all wallets and accounts. Removing a wallet withdraws its consent and queued
+approvals before deleting the local keystore. Duplicate imports remain separate.
+
+Run `npm run test:security` for corrected-candidate scope, worker, session, storage
+fault, key-facade and approval-screen fixtures. These tests use inert SDK boundaries
+and generated fixture state, and exercise the pinned SDK with public test entropy
+and an inert ledger; they do not send transactions or access real wallets.

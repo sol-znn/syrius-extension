@@ -2,12 +2,12 @@ import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useDispatch, useSelector } from 'react-redux';
 
-import { removeStorageWallet, loadStorageWalletNames } from '../../../services/utils/utils';
+import { loadStorageWalletNames } from '../../../services/utils/utils';
 import { notify } from '../../../services/utils/notify';
 import { resetWalletState } from '../../../services/redux/walletSlice';
 import { resetPendingTransactions } from '../../../services/redux/pendingTransactionsSlice';
 import { invalidateAccountCache } from '../../../services/hooks/useAccount';
-import lockWallet from '../../../services/wallet/lock';
+import removeWallet from '../../../services/wallet/removeWallet';
 import vault from '../../../services/wallet/vault';
 
 // Removing a wallet from this browser.
@@ -38,6 +38,7 @@ const ResetWallet = () => {
     if (!canRemove) {
       return;
     }
+    const binding = vault.getBinding();
     setIsRemoving(true);
 
     try {
@@ -46,12 +47,11 @@ const ResetWallet = () => {
         return;
       }
 
-      if (!removeStorageWallet(walletName)) {
+      if (!(await removeWallet(binding, walletName))) {
         notify.error('Could not remove that wallet.');
         return;
       }
 
-      await lockWallet();
       invalidateAccountCache();
       dispatch(resetWalletState());
       dispatch(resetPendingTransactions());

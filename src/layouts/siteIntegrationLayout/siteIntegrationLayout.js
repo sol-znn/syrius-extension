@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useSelector } from 'react-redux';
 import { Primitives, Zenon, utils as sdkUtils } from 'znn-ts-sdk';
@@ -6,8 +6,10 @@ import { Primitives, Zenon, utils as sdkUtils } from 'znn-ts-sdk';
 import useAccount from '../../services/hooks/useAccount';
 import useBlockSender from '../../services/hooks/useBlockSender';
 import vault from '../../services/wallet/vault';
+import selection from '../../services/wallet/selection';
 import { signMessage } from '../../services/wallet/signMessage';
 import { sendInternal } from '../../services/utils/messaging';
+import { identityOf, freezeApproval, approvalEnded } from '../../services/utils/approvalIdentity';
 import {
   formatAmount,
   formatExact,
@@ -105,7 +107,7 @@ const SiteHeader = ({ request }) => (
 
 const SiteIntegrationLayout = () => {
   const navigate = useNavigate();
-  const { address, isUnlocked } = useSelector((state) => state.wallet);
+  const { address: selectedAddress, isUnlocked } = useSelector((state) => state.wallet);
   const { chainIdentifier, nodeUrl } = useSelector(
     (state) => state.connectionParameters
   );
@@ -113,9 +115,20 @@ const SiteIntegrationLayout = () => {
   const { send, isSending, isGeneratingPlasma } = useBlockSender();
 
   const [request, setRequest] = useState(undefined);
+  const address = request?.binding?.scope.address || selectedAddress;
   const [preview, setPreview] = useState(null);
   const [isBusy, setIsBusy] = useState(false);
   const [isWaitingForMore, setIsWaitingForMore] = useState(false);
+  const rendered = useRef(null), operation = useRef(null), discarded = useRef(null), mounted = useRef(true);
+  rendered.current = { request, address, isUnlocked, chainIdentifier, nodeUrl };
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  const currentView = selected => selected?.binding && vault.getBinding() === selected.binding &&
+    selected.binding.id === selected.request?.binding?.id && selection.sameScope(selected.binding.scope, selected.request.binding.scope) &&
+    mounted.current && selected?.request && discarded.current !== selected.request &&
+    rendered.current.request === selected.request && rendered.current.isUnlocked &&
+    rendered.current.address === selected.address && rendered.current.chainIdentifier === selected.chainIdentifier &&
+    rendered.current.nodeUrl === selected.nodeUrl;
+
 
   // A locked wallet cannot answer anything. The password screen is told where
   // to come back to so the request is not lost.
@@ -145,7 +158,9 @@ const SiteIntegrationLayout = () => {
 
   const loadNext = useCallback(async () => {
     try {
-      const next = await sendInternal('approvals.next');
+      const value = await sendInternal('approvals.next', { binding: vault.getBinding() });
+      if (!mounted.current) return null;
+      const next = value ? freezeApproval(value) : null;
 
       if (next) {
         setRequest(next);
@@ -157,7 +172,9 @@ const SiteIntegrationLayout = () => {
         setTimeout(resolve, CLOSE_GRACE_MS);
       });
 
-      const late = await sendInternal('approvals.next');
+      const lateValue = await sendInternal('approvals.next', { binding: vault.getBinding() });
+      if (!mounted.current) return null;
+      const late = lateValue ? freezeApproval(lateValue) : null;
       setIsWaitingForMore(false);
 
       if (late) {
@@ -169,17 +186,20 @@ const SiteIntegrationLayout = () => {
       window.close();
       return null;
     } catch (err) {
+      if (!mounted.current) return null;
       setIsWaitingForMore(false);
       setRequest(null);
+      notify.error(err);
+      navigate('/password', { replace: true, state: { returnTo: '/site-integration' } });
       return null;
     }
-  }, []);
+  }, [navigate]);
 
   useEffect(() => {
     if (isUnlocked) {
       loadNext();
     }
-  }, [isUnlocked, loadNext]);
+  }, [isUnlocked, selectedAddress, loadNext]);
 
   // For an arbitrary account block, what will actually be signed — with the
   // fields the SDK fills in (chain, height, previous hash) resolved, rather
@@ -197,7 +217,7 @@ const SiteIntegrationLayout = () => {
         const template = Primitives.AccountBlockTemplate.fromJson(
           request.params
         );
-        const keyPair = vault.getKeyPair();
+        const keyPair = vault.getKeyPair(request.binding.scope.index);
         const filled = await sdkUtils.BlockUtils._checkAndSetFields(
           zenon,
           template,
@@ -222,118 +242,83 @@ const SiteIntegrationLayout = () => {
     };
   }, [request]);
 
-  const finish = async (id, result, grantOrigin = false) => {
-    await sendInternal('approvals.resolve', { id, result, grantOrigin });
-    await loadNext();
+  const approve = async (execute, success) => {
+    const selected = { request, address, chainIdentifier, nodeUrl, binding: vault.getBinding() };
+    if (operation.current || !currentView(selected)) return;
+    const active = { kind: 'approval', selected, identity: identityOf(request), claimed: false, submitted: false };
+    operation.current = active;
+    setIsBusy(true);
+    const localCurrent = () => operation.current === active && currentView(selected);
+    const assertRequest = async () => {
+      if (!localCurrent() || !active.claimed) throw approvalEnded();
+      if (!(await sendInternal('approvals.checkClaim', { identity: active.identity })) || !localCurrent()) throw approvalEnded();
+    };
+    try {
+      const { id: windowId } = await chrome.windows.getCurrent();
+      if (!localCurrent()) throw approvalEnded();
+      const claim = await sendInternal('approvals.claim', { identity: active.identity, windowId });
+      if (!claim) throw approvalEnded();
+      active.identity = claim;
+      active.claimed = true;
+      await assertRequest();
+      const result = await execute(selected.request, assertRequest, selected.binding, () => { active.submitted = true; });
+      await assertRequest();
+      if (!(await sendInternal('approvals.resolve', { identity: active.identity, result }))) throw approvalEnded();
+      if (success) notify.success(success);
+    } catch (error) {
+      // Selection/permission may change after publication starts, including
+      // between the SDK returning and the worker settling this request.
+      const reported = active.submitted
+        ? new Error('The transaction may have been submitted. Its outcome is unknown. Check the original account before retrying.') : error;
+      notify.error(reported);
+      // Unclaimed stale requests can be retired too. The queue refuses an
+      // unclaimed identity if another popup owns it, preserving the winner.
+      try {
+        await sendInternal('approvals.reject', { identity: active.identity,
+          error: { code: -32603, message: readableError(reported) } });
+      } catch (cleanupError) { notify.error(cleanupError); }
+    } finally {
+      if (operation.current === active) {
+        discarded.current = selected.request;
+        if (mounted.current) await loadNext();
+        operation.current = null;
+        if (mounted.current) setIsBusy(false);
+      }
+    }
   };
-
   const reject = async () => {
-    if (!request) {
-      return;
-    }
-    await sendInternal('approvals.reject', { id: request.id });
-    await loadNext();
-  };
-
-  //
-  // Connect
-  //
-  const approveConnect = async () => {
+    const selected = { request, address, chainIdentifier, nodeUrl, binding: vault.getBinding() };
+    if (operation.current || !currentView(selected)) return;
+    const active = { kind: 'rejection', selected };
+    operation.current = active;
+    discarded.current = request; // Invalidate copied callbacks before messaging/render.
     setIsBusy(true);
     try {
-      await finish(request.id, [address], true);
-    } finally {
-      setIsBusy(false);
+      if (!(await sendInternal('approvals.reject', { identity: identityOf(request) }))) throw approvalEnded();
+    } catch (error) { notify.error(error); }
+    finally {
+      if (operation.current === active) {
+        if (mounted.current) await loadNext();
+        operation.current = null;
+        if (mounted.current) setIsBusy(false);
+      }
     }
   };
 
-  //
-  // Send a plain transfer
-  //
-  const tokenFor = (tokenStandard) => balanceMap[tokenStandard];
-
-  const approveSendTransaction = async () => {
-    setIsBusy(true);
-
-    try {
-      const { to, tokenStandard, amount } = request.params;
-      const template = Primitives.AccountBlockTemplate.send(
-        Primitives.Address.parse(to),
-        Primitives.TokenStandard.parse(tokenStandard),
-        amount
-      );
-      const signed = await send(template);
-
-      await finish(request.id, {
-        hash: signed.hash?.toString(),
-        block: signed.toJson?.() ?? null,
-      });
-      notify.success('Transaction sent');
-    } catch (err) {
-      notify.error(err);
-      await sendInternal('approvals.reject', {
-        id: request.id,
-        error: { code: -32603, message: readableError(err) },
-      });
-      await loadNext();
-    } finally {
-      setIsBusy(false);
-    }
-  };
-
-  //
-  // Sign a message
-  //
-  // The only approval here that does not touch the network: no plasma, no
-  // block, nothing to broadcast. It is over as fast as an Ed25519 signature,
-  // and the site gets the answer the moment the button is pressed.
-  //
-  const approveSignMessage = async () => {
-    setIsBusy(true);
-
-    try {
-      const signed = await signMessage(request.params.message);
-
-      await finish(request.id, signed);
-      notify.success('Message signed');
-    } catch (err) {
-      notify.error(err);
-      await sendInternal('approvals.reject', {
-        id: request.id,
-        error: { code: -32603, message: readableError(err) },
-      });
-      await loadNext();
-    } finally {
-      setIsBusy(false);
-    }
-  };
-
-  //
-  // Sign and send an arbitrary block
-  //
-  const approveSignAndSend = async () => {
-    setIsBusy(true);
-
-    try {
-      const template = Primitives.AccountBlockTemplate.fromJson(request.params);
-      const signed = await send(template);
-
-      await finish(request.id, {
-        hash: signed.hash?.toString(),
-        block: signed.toJson?.() ?? null,
-      });
-      notify.success('Block sent');
-    } catch (err) {
-      notify.error(err);
-      await sendInternal('approvals.reject', {
-        id: request.id,
-        error: { code: -32603, message: readableError(err) },
-      });
-      await loadNext();
-    } finally {
-      setIsBusy(false);
-    }
-  };
+  const tokenFor = tokenStandard => balanceMap[tokenStandard];
+  const approveConnect = () => approve(async () => [address]);
+  const blockResult = signed => ({ hash: signed.hash?.toString(), block: signed.toJson?.() ?? null });
+  const approveSendTransaction = () => approve(async (selected, assertRequest, binding, onSubmitted) => {
+    const { to, tokenStandard, amount } = selected.params;
+    const template = Primitives.AccountBlockTemplate.send(Primitives.Address.parse(to), Primitives.TokenStandard.parse(tokenStandard), amount);
+    return blockResult(await send(template, { assertRequest, binding, onSubmitted, addressIndex: binding.scope.index }));
+  }, 'Transaction sent');
+  const approveSignMessage = () => approve((selected, assertRequest, binding) =>
+    signMessage(selected.params.message, { assertRequest, binding, addressIndex: binding.scope.index }), 'Message signed');
+  const approveSignAndSend = () => approve(async (selected, assertRequest, binding, onSubmitted) => {
+    const template = Primitives.AccountBlockTemplate.fromJson(selected.params);
+    return blockResult(await send(template, { assertRequest, binding, onSubmitted, addressIndex: binding.scope.index }));
+  }, 'Block sent');
 
   if (request === undefined) {
     return (
@@ -393,6 +378,11 @@ const SiteIntegrationLayout = () => {
   return (
     <div className="page approval-screen">
       <SiteHeader request={request} />
+      <div className="approval-body">
+        <strong>{request.binding.scope.walletName} · Account {request.binding.scope.index + 1}</strong>
+        <p className="word-break-all">{request.binding.scope.address}</p>
+      </div>
+      {busy && operation.current?.kind === 'approval' && <p className="approval-note" role="status">Your approval is being processed and can no longer be rejected.</p>}
 
       {request.type === 'connect' && (
         <>
@@ -419,6 +409,7 @@ const SiteIntegrationLayout = () => {
               type="button"
               className="button secondary w-100"
               onClick={reject}
+              disabled={busy}
             >
               Cancel
             </button>
@@ -492,6 +483,7 @@ const SiteIntegrationLayout = () => {
               type="button"
               className="button secondary w-100"
               onClick={reject}
+              disabled={busy}
             >
               Reject
             </button>
@@ -532,6 +524,7 @@ const SiteIntegrationLayout = () => {
               type="button"
               className="button secondary w-100"
               onClick={reject}
+              disabled={busy}
             >
               Reject
             </button>
@@ -652,6 +645,7 @@ const SiteIntegrationLayout = () => {
               type="button"
               className="button secondary w-100"
               onClick={reject}
+              disabled={busy}
             >
               Reject
             </button>

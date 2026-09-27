@@ -1,4 +1,5 @@
 import { KeyStore, KeyStoreManager, Primitives } from 'znn-ts-sdk';
+import selection from './selection';
 
 // The unlocked wallet, held once.
 //
@@ -14,6 +15,8 @@ import { KeyStore, KeyStoreManager, Primitives } from 'znn-ts-sdk';
 // It happens once here, at unlock. Screens ask this module for a key pair.
 
 const state = {
+  generation: 0,
+  binding: null,
   walletName: null,
   keyStore: null,
   // Which of the wallet's derived addresses is in use.
@@ -46,6 +49,9 @@ const getEntropy = () => (state.keyStore ? state.keyStore.entropy : null);
 const getMnemonic = () => (state.keyStore ? state.keyStore.mnemonic : null);
 
 const clear = () => {
+  state.generation += 1;
+  state.binding = null;
+  signingKeyPairs.clear();
   state.walletName = null;
   state.keyStore = null;
   state.selectedIndex = 0;
@@ -63,15 +69,16 @@ const adopt = (walletName, keyStore) => {
 // The slow path, used once when somebody types their password. Throws when the
 // password is wrong — the SDK's own error, which `readableError` turns into
 // "Wrong password."
-const unlockWithPassword = async (walletName, password) => {
+const preparePassword = async (walletName, password) => {
   const manager = new KeyStoreManager();
   const keyStore = await manager.readKeyStore(password, walletName);
 
   if (!keyStore) {
     throw new Error('Error decrypting');
   }
-  return adopt(walletName, keyStore);
+  return keyStore;
 };
+const unlockWithPassword = async (walletName, password) => adopt(walletName, await preparePassword(walletName, password));
 
 // The fast path, used when the popup reopens inside an unexpired session. No
 // key derivation function runs at all.
@@ -106,7 +113,9 @@ const getKeyPair = (index = state.selectedIndex) => {
 
 const getAddress = async (index = state.selectedIndex) => {
   if (!state.addresses.has(index)) {
+    const generation = state.generation;
     const address = (await getKeyPair(index).getAddress()).toString();
+    if (state.generation !== generation) throw selection.ended();
     state.addresses.set(index, address);
   }
   return state.addresses.get(index);
@@ -133,7 +142,10 @@ const signingKeyPairs = new Map();
 
 const getSigningKeyPair = async (index = state.selectedIndex) => {
   if (!signingKeyPairs.has(index)) {
-    signingKeyPairs.set(index, await getKeyPair(index).generateKeyPair());
+    const generation = state.generation;
+    const pair = await getKeyPair(index).generateKeyPair();
+    if (state.generation !== generation) throw selection.ended();
+    signingKeyPairs.set(index, pair);
   }
   return signingKeyPairs.get(index);
 };
@@ -159,7 +171,16 @@ const verifyPassword = async (password) => {
   }
 };
 
+const bind = record => {
+  state.binding = Object.freeze({ id: record.id, ownerId: record.ownerId, scope: Object.freeze({ ...record.scope }) });
+};
+const getBinding = () => state.binding;
+const assertBinding = binding => {
+  if (!binding || state.binding !== binding || !isUnlocked() || state.selectedIndex !== binding.scope.index) throw selection.ended();
+};
+
 const vault = {
+  preparePassword, adopt, bind, getBinding, assertBinding,
   isUnlocked,
   getWalletName,
   getSelectedIndex,

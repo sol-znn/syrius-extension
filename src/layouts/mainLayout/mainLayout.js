@@ -97,7 +97,8 @@ const MainLayout = () => {
         try {
           await completeUnlock({
             walletName: unlock.walletName,
-            entropy: unlock.entropy,
+            unlock,
+            isCurrent: () => !cancelled,
             dispatch,
           });
           if (!cancelled) {
@@ -110,7 +111,7 @@ const MainLayout = () => {
         } catch (err) {
           // A session that cannot be turned back into a wallet is a session
           // worth forgetting rather than one worth reporting.
-          await session.clear();
+          await session.clear(unlock.id);
         }
       }
 
