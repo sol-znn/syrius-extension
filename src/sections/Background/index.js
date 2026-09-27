@@ -1,6 +1,7 @@
 import frames from './frames';
 import permissions from './permissions';
 import requests from './requests';
+import publicNodeUrl from '../../services/utils/publicNodeUrl';
 
 // The service worker.
 //
@@ -88,12 +89,19 @@ const getPublicState = async () => {
   return readSession(publicStateKey);
 };
 
+// Read consent after the asynchronous state lookup, so a revoke during that
+// lookup takes effect before forming any private read response.
+const getConnectedPublicState = async origin => {
+  const state = await getPublicState();
+  return await permissions.isConnected(origin) ? state : null;
+};
+
 //
 // Talking back to pages
 //
-const sendToTab = async (tabId, message, frameId) => {
+const sendToTab = async (tabId, message, frameId, documentId) => {
   try {
-    await chrome.tabs.sendMessage(tabId, message, frameId === undefined ? {} : { frameId });
+    await chrome.tabs.sendMessage(tabId, message, { ...(frameId === undefined ? {} : { frameId }), ...(documentId ? { documentId } : {}) });
   } catch (err) {
     // The tab navigated away or closed. Nothing to deliver to and nothing to
     // do about it.
@@ -115,9 +123,12 @@ const broadcast = async (event, data) => {
   const targets = await frames.forTabs(origins);
 
   await Promise.all(
-    targets.map((frame) =>
-      sendToTab(frame.tabId, { channel: 'znn', kind: 'event', event, data }, frame.frameId)
-    )
+    targets.map(async frame => {
+      // The initial list can become stale while the frame registry is read.
+      if (await permissions.isConnected(frame.origin)) {
+        await sendToTab(frame.tabId, { channel: 'znn', kind: 'event', event, data }, frame.frameId, frame.documentId);
+      }
+    })
   );
 };
 
@@ -151,16 +162,14 @@ const providerMethods = {
   // Cheap, unprompted truth about the current state. A site uses this to decide
   // whether to show a "connect" button, so it must never open a window.
   znn_accounts: async ({ origin }) => {
-    if (!(await permissions.isConnected(origin))) {
-      return [];
-    }
-    const state = await getPublicState();
+    const state = await getConnectedPublicState(origin);
     return state?.address ? [state.address] : [];
   },
 
-  znn_chainId: async () => (await getPublicState())?.chainId ?? null,
+  znn_chainId: async ({ origin }) => (await getConnectedPublicState(origin))?.chainId ?? null,
 
-  znn_nodeUrl: async () => (await getPublicState())?.nodeUrl ?? null,
+  // Redact at egress too: a session can retain raw state from an older build.
+  znn_nodeUrl: async ({ origin }) => publicNodeUrl((await getConnectedPublicState(origin))?.nodeUrl),
 
   // Connecting. An origin that has been connected before and is still unlocked
   // is answered straight away — re-asking a question already answered is the
@@ -168,8 +177,7 @@ const providerMethods = {
   znn_connect: async ({ id, origin, target, sender }) => {
     const state = await getPublicState();
 
-    if ((await permissions.isConnected(origin)) && state?.address) {
-      await permissions.touch(origin);
+    if (state?.address && await permissions.touch(origin)) {
       return { settled: true, result: [state.address] };
     }
     await queueApproval('connect', { id, target, origin, sender });
@@ -278,7 +286,16 @@ const internalMethods = {
       return false;
     }
     if (grantOrigin) {
-      await permissions.grant(request.origin, { title: request.title, favicon: request.favicon });
+      try {
+        if (!(await permissions.grant(request.origin, { title: request.title, favicon: request.favicon }))) {
+          throw new Error('The connection permission could not be saved.');
+        }
+      } catch (error) {
+        // The queue row has already been removed: answer its original caller
+        // with the failed grant rather than leaving its connection pending.
+        await respond(request, id, undefined, { ...errors.internal, message: error.message });
+        return false;
+      }
     }
     await respond(request, id, result);
     return true;
@@ -322,7 +339,7 @@ const internalMethods = {
     return true;
   },
   'events.nodeChanged': async ({ nodeUrl }) => {
-    await broadcast('nodeChanged', nodeUrl);
+    await broadcast('nodeChanged', publicNodeUrl(nodeUrl));
     return true;
   },
 

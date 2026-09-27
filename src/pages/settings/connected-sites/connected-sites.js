@@ -22,11 +22,14 @@ const hostOf = (origin) => {
 const ConnectedSites = () => {
   const [sites, setSites] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
 
   const load = useCallback(async () => {
     try {
       setSites((await sendInternal('permissions.list')) || []);
+      setLoadError(false);
     } catch (err) {
+      setLoadError(true);
       notify.error(err);
     } finally {
       setIsLoading(false);
@@ -44,6 +47,7 @@ const ConnectedSites = () => {
       notify.success(`Disconnected ${hostOf(origin)}`);
     } catch (err) {
       notify.error(err);
+      await load();
     }
   };
 
@@ -54,6 +58,7 @@ const ConnectedSites = () => {
       notify.success('Disconnected every site');
     } catch (err) {
       notify.error(err);
+      await load();
     }
   };
 
@@ -67,7 +72,13 @@ const ConnectedSites = () => {
 
   return (
     <div className="page">
-      {!sites.length && (
+      {loadError && (
+        <p className="empty-note" role="alert">
+          Unable to load connected sites.
+          <button type="button" className="thin-button secondary" onClick={load}>Retry</button>
+        </p>
+      )}
+      {!loadError && !sites.length && (
         <p className="empty-note">
           No sites are connected. A site can read your address only after you approve it.
         </p>
@@ -84,6 +95,7 @@ const ConnectedSites = () => {
           <div className="site-row-text">
             <div className="site-host">{hostOf(site.origin)}</div>
             <div className="site-origin">{site.origin}</div>
+            {site.revocationPending && <div className="site-origin" role="status">Access blocked. Retry disconnect.</div>}
           </div>
 
           <button
@@ -91,7 +103,7 @@ const ConnectedSites = () => {
             className="thin-button secondary"
             onClick={() => revoke(site.origin)}
           >
-            Disconnect
+            {site.revocationPending ? 'Retry disconnect' : 'Disconnect'}
           </button>
         </div>
       ))}

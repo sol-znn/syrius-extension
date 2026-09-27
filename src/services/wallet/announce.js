@@ -2,6 +2,7 @@ import { Zenon } from 'znn-ts-sdk';
 import { sendInternalQuietly } from '../utils/messaging';
 import { getCurrentNodeUrl } from '../utils/storage';
 import session from './session';
+import publicNodeUrl from '../utils/publicNodeUrl';
 
 // Telling the rest of the world what the wallet is pointed at.
 //
@@ -18,7 +19,7 @@ import session from './session';
 const publicState = async (address) => ({
   address: address || null,
   chainId: Zenon.getChainIdentifier(),
-  nodeUrl: getCurrentNodeUrl(),
+  nodeUrl: publicNodeUrl(getCurrentNodeUrl()),
 });
 
 // Publishing is awaited because the service worker answers a site's read-only
@@ -42,7 +43,7 @@ const announceChain = async (chainId, address) => {
 
 const announceNode = async (nodeUrl, address) => {
   await session.publish(await publicState(address));
-  await sendInternalQuietly('events.nodeChanged', { nodeUrl });
+  await sendInternalQuietly('events.nodeChanged', { nodeUrl: publicNodeUrl(nodeUrl) });
 };
 
 // Locking has to reach the pages, or a site keeps showing an address for a

@@ -37,6 +37,8 @@ notes behind it are in [REFACTOR.md](REFACTOR.md).
 
 ## Installation
 
+Requires Chrome/Chromium 111 or later for document-bound provider events.
+
 ### From a release
 
 Every `v*.*.*` tag is built by GitHub Actions and published as a Chrome/Brave
@@ -193,8 +195,8 @@ const zenon = window.zenon ?? (await new Promise((resolve) =>
 
 // Read-only, never prompts. Empty until this origin is connected.
 await zenon.getAccounts();   // [] | ['z1q…']
-await zenon.getChainId();    // 1 for mainnet
-await zenon.getNodeUrl();
+await zenon.getChainId();    // null until connected/unlocked; 1 for mainnet
+await zenon.getNodeUrl();    // null | ws(s)://host[:port], without private endpoint details
 
 // Opens the connect prompt. Resolves immediately for an origin already
 // connected; rejects with {code: 4001} if the person declines.
@@ -223,6 +225,18 @@ zenon.on('nodeChanged', (nodeUrl) => {});
 
 await zenon.disconnect();
 ```
+
+Chain and node reads are unprompted and return `null` until the origin is
+connected and the wallet is unlocked. Node reads, node-change events and legacy
+grant fields expose only the WebSocket scheme, host and nondefault port. URL
+credentials, paths, query strings and fragments remain private. This public
+descriptor may not be a usable connection endpoint; the wallet keeps the full
+configured URL for its own SDK connection and reconnect fallback.
+
+Failed disconnections remain visible in Connected Sites for retry. Treat an
+error as incomplete and retry until the site is removed. A saved session denial
+blocks access while a failed durable removal is pending; it is not a substitute
+for completing that removal before restarting the browser.
 
 Errors follow EIP-1193 numbering: `4001` the person declined, `4100` the origin
 is not connected, `4200` unknown method, `4900` the wallet is locked, `-32602`

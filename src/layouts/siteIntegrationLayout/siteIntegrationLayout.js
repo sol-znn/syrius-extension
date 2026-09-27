@@ -8,6 +8,7 @@ import useBlockSender from '../../services/hooks/useBlockSender';
 import vault from '../../services/wallet/vault';
 import { signMessage } from '../../services/wallet/signMessage';
 import { sendInternal } from '../../services/utils/messaging';
+import publicNodeUrl from '../../services/utils/publicNodeUrl';
 import {
   formatAmount,
   formatExact,
@@ -223,7 +224,9 @@ const SiteIntegrationLayout = () => {
   }, [request]);
 
   const finish = async (id, result, grantOrigin = false) => {
-    await sendInternal('approvals.resolve', { id, result, grantOrigin });
+    if (!(await sendInternal('approvals.resolve', { id, result, grantOrigin }))) {
+      throw new Error('The approval could not be completed.');
+    }
     await loadNext();
   };
 
@@ -242,6 +245,9 @@ const SiteIntegrationLayout = () => {
     setIsBusy(true);
     try {
       await finish(request.id, [address], true);
+    } catch (error) {
+      notify.error(error);
+      await loadNext();
     } finally {
       setIsBusy(false);
     }
@@ -400,7 +406,8 @@ const SiteIntegrationLayout = () => {
             <h2 className="approval-title">Connect this wallet?</h2>
             <p className="approval-note">
               {hostOf(request.origin)} will be able to see your address, the
-              chain you are signing for and your node URL. It cannot move
+              chain you are signing for and your node host. Private endpoint details
+              stay in your wallet. It cannot move
               anything without asking again.
             </p>
 
@@ -409,8 +416,8 @@ const SiteIntegrationLayout = () => {
               <dd className="word-break-all">{address}</dd>
               <dt>Chain</dt>
               <dd>{chainIdentifier}</dd>
-              <dt>Node</dt>
-              <dd className="word-break-all">{nodeUrl}</dd>
+              <dt>Node host</dt>
+              <dd className="word-break-all">{publicNodeUrl(nodeUrl) || 'Unavailable'}</dd>
             </dl>
           </div>
 
