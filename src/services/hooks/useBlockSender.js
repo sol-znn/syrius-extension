@@ -2,6 +2,7 @@ import { useCallback, useState } from 'react';
 import { Enums, Zenon } from 'znn-ts-sdk';
 
 import vault from '../wallet/vault';
+import { assertCallApproval, callSigningKey } from '../wallet/callApproval';
 import { invalidateAccountCache } from './useAccount';
 
 // Signing and broadcasting one account block, for the one caller that has to
@@ -28,14 +29,16 @@ const useBlockSender = () => {
   const [isSending, setIsSending] = useState(false);
   const [isGeneratingPlasma, setIsGeneratingPlasma] = useState(false);
 
-  const send = useCallback(async (template, { addressIndex } = {}) => {
+  const send = useCallback(async (template, { addressIndex, approvedCall, isCurrent } = {}) => {
     const zenon = Zenon.getSingleton();
+    if (approvedCall) assertCallApproval(approvedCall, template, isCurrent);
     const keyPair = await vault.getSigningKeyPair(addressIndex);
+    const signer = approvedCall ? callSigningKey(keyPair, approvedCall, template, isCurrent) : keyPair;
 
     setIsSending(true);
 
     try {
-      const signed = await zenon.send(template, keyPair, (status) => {
+      const signed = await zenon.send(template, signer, (status) => {
         // `PowStatus.generating` is 0, so this has to compare rather than test
         // for truth — the obvious `if (status)` reads it as "done".
         if (status === Enums.PowStatus.generating) {
@@ -48,6 +51,7 @@ const useBlockSender = () => {
 
       // The balance on screen is now stale by definition.
       invalidateAccountCache();
+      if (approvedCall) assertCallApproval(approvedCall, signed, isCurrent);
       return signed;
     } finally {
       // In `finally`, so an error cannot leave the screen saying it is working.

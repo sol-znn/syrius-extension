@@ -1,11 +1,12 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useSelector } from 'react-redux';
-import { Primitives, Zenon, utils as sdkUtils } from 'znn-ts-sdk';
+import { Primitives } from 'znn-ts-sdk';
 
 import useAccount from '../../services/hooks/useAccount';
 import useBlockSender from '../../services/hooks/useBlockSender';
-import vault from '../../services/wallet/vault';
+import { prepareCallApproval, templateForCallApproval } from '../../services/wallet/callApproval';
+import ContractCallArguments from '../../components/contract-call-arguments/contract-call-arguments';
 import { signMessage } from '../../services/wallet/signMessage';
 import { sendInternal } from '../../services/utils/messaging';
 import {
@@ -16,8 +17,7 @@ import {
 } from '../../services/utils/format';
 import { readableError } from '../../services/utils/errors';
 import { notify } from '../../services/utils/notify';
-import { embeddedContractName } from '../../services/utils/contracts';
-import { decodeCall, describeCall, contractDisplayName } from '../../services/utils/contractCalls';
+import { decodeApprovalCall } from '../../services/utils/approvalContractCalls';
 
 // What a site is asking for, and the choice about it.
 //
@@ -47,32 +47,11 @@ const hostOf = (origin) => {
 // approval, because "unknown" is exactly the case where reading the raw data
 // below is not optional.
 const describeBlock = (json, tokenFor) => {
-  const contract = embeddedContractName(json?.toAddress);
   const entry = tokenFor(json?.tokenStandard);
-  const amount = json?.amount;
-  const hasAmount = Boolean(amount) && amount !== '0';
-
-  if (!contract) {
-    return {
-      kind: 'transfer',
-      to: json?.toAddress,
-      amount,
-      hasAmount,
-      decimals: entry?.token?.decimals,
-      symbol: entry?.token?.symbol,
-      tokenStandard: json?.tokenStandard,
-    };
-  }
-
-  const method = decodeCall(contract, json?.data);
-  const contractName = contractDisplayName(contract);
-
   return {
-    kind: method ? 'knownCall' : 'unknownCall',
-    contract: contractName,
-    label: method ? describeCall(contract, method) : null,
-    amount,
-    hasAmount,
+    ...decodeApprovalCall(json),
+    amount: json?.amount,
+    hasAmount: Boolean(json?.amount) && json.amount !== '0',
     decimals: entry?.token?.decimals,
     symbol: entry?.token?.symbol,
     tokenStandard: json?.tokenStandard,
@@ -116,6 +95,14 @@ const SiteIntegrationLayout = () => {
   const [preview, setPreview] = useState(null);
   const [isBusy, setIsBusy] = useState(false);
   const [isWaitingForMore, setIsWaitingForMore] = useState(false);
+  const rendered = useRef(null);
+  const callBusy = useRef(false);
+  const discardedCall = useRef(null);
+  rendered.current = { request, preview, address, isUnlocked, chainIdentifier, nodeUrl };
+  const currentPreview = preview && preview.request === request && preview.address === address &&
+    preview.chainIdentifier === chainIdentifier && preview.nodeUrl === nodeUrl && isUnlocked ? preview : null;
+  const currentCall = currentPreview?.approval && discardedCall.current !== request ? currentPreview : null;
+
 
   // A locked wallet cannot answer anything. The password screen is told where
   // to come back to so the request is not lost.
@@ -181,46 +168,22 @@ const SiteIntegrationLayout = () => {
     }
   }, [isUnlocked, loadNext]);
 
-  // For an arbitrary account block, what will actually be signed — with the
-  // fields the SDK fills in (chain, height, previous hash) resolved, rather
-  // than the bare JSON the page sent.
+  // Bind the displayed call to one canonical SDK snapshot. Never let a late
+  // preparation label the next request, or sign by reparsing the page's params.
   useEffect(() => {
-    if (!request || request.type !== 'signAndSendBlock') {
+    if (!isUnlocked || !request || request.type !== 'signAndSendBlock') {
       setPreview(null);
       return;
     }
     let cancelled = false;
-
-    (async () => {
-      try {
-        const zenon = Zenon.getSingleton();
-        const template = Primitives.AccountBlockTemplate.fromJson(
-          request.params
-        );
-        const keyPair = vault.getKeyPair();
-        const filled = await sdkUtils.BlockUtils._checkAndSetFields(
-          zenon,
-          template,
-          keyPair
-        );
-
-        if (!cancelled) {
-          setPreview(filled.toJson());
-        }
-      } catch (err) {
-        if (!cancelled) {
-          // Falling back to what the site sent is better than a blank panel:
-          // the point of this screen is that the block is visible before it is
-          // signed.
-          setPreview(request.params);
-        }
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [request]);
+    const context = { request, address, chainIdentifier, nodeUrl };
+    prepareCallApproval(request.params).then(approval => {
+      if (!cancelled && discardedCall.current !== request) setPreview({ ...context, approval });
+    }).catch(error => {
+      if (!cancelled && discardedCall.current !== request) setPreview({ ...context, error: readableError(error) });
+    });
+    return () => { cancelled = true; };
+  }, [request, address, isUnlocked, chainIdentifier, nodeUrl]);
 
   const finish = async (id, result, grantOrigin = false) => {
     await sendInternal('approvals.resolve', { id, result, grantOrigin });
@@ -228,8 +191,13 @@ const SiteIntegrationLayout = () => {
   };
 
   const reject = async () => {
-    if (!request) {
-      return;
+    if (!request || rendered.current.request !== request || callBusy.current) return;
+    if (request.type === 'signAndSendBlock') {
+      // Reject wins before any await or React render. Once submission starts,
+      // it cannot be recalled, so its Reject control is disabled instead.
+      discardedCall.current = request;
+      rendered.current.preview = null;
+      setPreview(null);
     }
     await sendInternal('approvals.reject', { id: request.id });
     await loadNext();
@@ -312,25 +280,32 @@ const SiteIntegrationLayout = () => {
   // Sign and send an arbitrary block
   //
   const approveSignAndSend = async () => {
+    const selected = currentCall;
+    const isCurrent = () => Boolean(selected && discardedCall.current !== selected.request && rendered.current.isUnlocked &&
+      rendered.current.request === selected.request && rendered.current.preview === selected &&
+      rendered.current.address === selected.address && rendered.current.chainIdentifier === selected.chainIdentifier &&
+      rendered.current.nodeUrl === selected.nodeUrl);
+    if (!isCurrent() || callBusy.current) return;
+    callBusy.current = true;
     setIsBusy(true);
-
     try {
-      const template = Primitives.AccountBlockTemplate.fromJson(request.params);
-      const signed = await send(template);
-
-      await finish(request.id, {
-        hash: signed.hash?.toString(),
-        block: signed.toJson?.() ?? null,
+      const template = templateForCallApproval(selected.approval);
+      const signed = await send(template, { approvedCall: selected.approval, isCurrent });
+      if (!isCurrent()) return;
+      await finish(selected.request.id, {
+        hash: signed.hash?.toString(), block: signed.toJson?.() ?? null,
       });
       notify.success('Block sent');
-    } catch (err) {
-      notify.error(err);
-      await sendInternal('approvals.reject', {
-        id: request.id,
-        error: { code: -32603, message: readableError(err) },
-      });
-      await loadNext();
+    } catch (error) {
+      if (isCurrent()) {
+        notify.error(error);
+        await sendInternal('approvals.reject', {
+          id: selected.request.id, error: { code: -32603, message: readableError(error) },
+        });
+        await loadNext();
+      }
     } finally {
+      callBusy.current = false;
       setIsBusy(false);
     }
   };
@@ -368,7 +343,7 @@ const SiteIntegrationLayout = () => {
   // plain transfer and an arbitrary block; a contract call with no value has an
   // amount of zero and never trips it.
   const shortfall = (() => {
-    const { tokenStandard, amount } = request.params || {};
+    const { tokenStandard, amount } = (request.type === 'signAndSendBlock' ? currentCall?.approval.block : request.params) || {};
     const wanted = toBigNumber(amount);
 
     if (wanted.isZero()) {
@@ -553,7 +528,10 @@ const SiteIntegrationLayout = () => {
             <h2 className="approval-title">Sign this block?</h2>
 
             {(() => {
-              const json = preview ?? request.params;
+              if (!currentCall) return <p className={currentPreview?.error ? 'approval-warning' : 'approval-note'} role={currentPreview?.error ? 'alert' : undefined}>
+                {currentPreview?.error ? `Unable to prepare this block: ${currentPreview.error}` : 'Preparing block details…'}
+              </p>;
+              const json = currentCall.approval.block;
               const info = describeBlock(json, tokenFor);
               const amountRow = info.hasAmount && (
                 <>
@@ -581,13 +559,14 @@ const SiteIntegrationLayout = () => {
                 return (
                   <>
                     <p className="approval-warning" role="alert">
-                      This calls the {info.contract} contract with a method
-                      this wallet does not recognize. Read the raw data below
-                      before approving.
+                      This wallet cannot fully interpret this call or its data.
+                      Verify the complete raw data before approving.
                     </p>
                     <dl className="confirm-details">
                       <dt>Contract</dt>
                       <dd>{info.contract}</dd>
+                      <dt>Destination</dt>
+                      <dd className="word-break-all">{info.to}</dd>
                       {amountRow}
                     </dl>
                   </>
@@ -603,10 +582,15 @@ const SiteIntegrationLayout = () => {
                     <dl className="confirm-details">
                       <dt>Action</dt>
                       <dd>{info.label}</dd>
+                      <dt>Method</dt>
+                      <dd>{info.method}</dd>
                       <dt>Contract</dt>
                       <dd>{info.contract}</dd>
+                      <dt>Destination</dt>
+                      <dd className="word-break-all">{info.to}</dd>
                       {amountRow}
                     </dl>
+                    <ContractCallArguments args={info.args} />
                   </>
                 );
               }
@@ -633,10 +617,14 @@ const SiteIntegrationLayout = () => {
               );
             })()}
 
+            {currentCall && !currentCall.approval.networkPrepared && (
+              <p className="approval-note">Current network details are unavailable. Signing will retry the connection.</p>
+            )}
+            {busy && <p className="approval-note" role="status">Submission has started. This approval can no longer be rejected.</p>}
             <details className="block-preview-details">
               <summary>Raw transaction data</summary>
               <pre className="block-preview">
-                {JSON.stringify(preview ?? request.params, null, 2)}
+                {JSON.stringify(currentCall?.approval.block ?? request.params, null, 2)}
               </pre>
             </details>
 
@@ -652,6 +640,7 @@ const SiteIntegrationLayout = () => {
               type="button"
               className="button secondary w-100"
               onClick={reject}
+              disabled={busy || discardedCall.current === request}
             >
               Reject
             </button>
@@ -659,7 +648,7 @@ const SiteIntegrationLayout = () => {
               type="button"
               className="button warning w-100"
               onClick={approveSignAndSend}
-              disabled={busy || Boolean(shortfall)}
+              disabled={busy || !currentCall || Boolean(shortfall)}
             >
               {busy ? busyLabel : 'Sign and send'}
             </button>

@@ -2276,3 +2276,17 @@ button:disabled {
     transition-duration: 0.01ms !important;
   }
 }
+
+// Contract arguments are always visible and can contain full addresses, large
+// integer quantities and long text. A vertical layout avoids truncating values.
+.contract-arguments {
+  margin: 16px 0 0;
+  dt { color: var(--text-faint); font-size: 11px; margin-top: 12px; }
+  dd {
+    margin: 4px 0 0;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    unicode-bidi: plaintext;
+    font-variant-numeric: tabular-nums;
+  }
+}
