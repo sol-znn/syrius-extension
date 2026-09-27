@@ -1,39 +1,18 @@
-// Which sites this wallet has been connected to.
-//
-// The old bridge had no concept of a connected site: every call from a page
-// opened a popup asking the same question again, and answering it granted
-// nothing that outlived the answer. That is why the content script had to be
-// pinned to a single hard-coded domain — there was no other way to bound who
-// could ask.
-//
-// A connection here is read access to the selected address, the chain
-// identifier and the node URL, granted per origin and remembered. It is never
-// permission to move anything: signing and sending are prompted every time,
-// the way they are in every wallet a person is likely to have used.
-
+// Readers and writers share a lock: an immediate follow-up waits for the
+// accepted connection's durable promotion, and stale writes cannot undo revoke.
 const storageKey = 'syrius.permissions';
-
-const readAll = async () => {
-  try {
-    const stored = await chrome.storage.local.get(storageKey);
-    return stored[storageKey] || {};
-  } catch (err) {
-    return {};
-  }
+const serialized = operation => navigator.locks.request(storageKey, operation);
+const own = (all, key) => Object.hasOwn(all, key) ? all[key] : null;
+const readAll = async () => (await chrome.storage.local.get(storageKey))[storageKey] || {};
+const writeAll = all => chrome.storage.local.set({ [storageKey]: all });
+// Tentative state is durably inactive by itself, including after session loss.
+// Preserve prior consent; old tentative formats require a fresh connection.
+const activeEntry = entry => entry?.pendingApproval ? entry.previous || null
+  : entry?.approvalAttempt ? null : entry || null;
+const checkDeadline = expiresAt => {
+  if (!Number.isFinite(expiresAt) || Date.now() >= expiresAt) throw new Error('Approval expired during finalization.');
 };
 
-const writeAll = async (permissions) => {
-  try {
-    await chrome.storage.local.set({ [storageKey]: permissions });
-    return true;
-  } catch (err) {
-    return false;
-  }
-};
-
-// A page can claim to be any origin it likes in a postMessage, so the origin
-// used for a permission decision is always the one Chrome reports for the
-// sender, never one the page supplied.
 const originOf = (sender) => {
   if (sender && sender.origin) {
     return sender.origin;
@@ -45,52 +24,50 @@ const originOf = (sender) => {
   }
 };
 
-const isConnected = async (origin) => {
-  if (!origin) {
-    return false;
+const isConnected = async origin => {
+  try { return await serialized(async () => Boolean(origin && activeEntry(own(await readAll(), origin)))); }
+  catch (error) { return false; }
+};
+const get = origin => serialized(async () => activeEntry(own(await readAll(), origin)));
+const list = () => serialized(async () => Object.values(await readAll()).map(activeEntry).filter(Boolean)
+  .sort((a, b) => (b.connectedAt || 0) - (a.connectedAt || 0)));
+
+const grant = (origin, { title = '', favicon = '' } = {}, { expiresAt, confirm } = {}) => serialized(async () => {
+  if (!origin || typeof confirm !== 'function') return false;
+  checkDeadline(expiresAt);
+  const all = await readAll(); checkDeadline(expiresAt);
+  const previous = activeEntry(own(all, origin));
+  const restored = { ...all }; if (previous) restored[origin] = previous; else delete restored[origin];
+  const completed = { origin, title, favicon,
+    connectedAt: previous?.connectedAt || Date.now(), lastUsedAt: Date.now() };
+  // A failed write cannot leave unmarked new authority. No session-only denial
+  // is needed to interpret this row after a browser restart.
+  await writeAll({ ...all, [origin]: { pendingApproval: { id: crypto.randomUUID(), expiresAt }, previous } });
+  try {
+    checkDeadline(expiresAt);
+    const receipt = await confirm();
+    if (receipt?.accepted !== true || !Number.isFinite(receipt.acceptedAt) || receipt.acceptedAt >= expiresAt) {
+      throw new Error('The connection was not accepted before its approval expired.');
+    }
+    // The exact isolated relay accepted the response before expiry. This is
+    // the consent commitment point, even if its native acknowledgement arrives
+    // later. Durable promotion completes that already-accepted decision. If it
+    // fails, the provisional row remains inactive and reconnect is required.
+    await writeAll({ ...all, [origin]: { ...completed, approvalAcceptedAt: receipt.acceptedAt } });
+    return true;
+  } catch (error) {
+    await writeAll(restored).catch(() => {}); // Stranded provisional stays inactive.
+    throw error;
   }
-  const all = await readAll();
-  return Boolean(all[origin]);
-};
-
-const get = async (origin) => (await readAll())[origin] || null;
-
-const list = async () => {
-  const all = await readAll();
-  return Object.values(all).sort((a, b) => (b.connectedAt || 0) - (a.connectedAt || 0));
-};
-
-const grant = async (origin, { title = '', favicon = '' } = {}) => {
-  if (!origin) {
-    return false;
-  }
-  const all = await readAll();
-  all[origin] = {
-    origin,
-    title,
-    favicon,
-    connectedAt: all[origin]?.connectedAt || Date.now(),
-    lastUsedAt: Date.now(),
-  };
-  return writeAll(all);
-};
-
-const revoke = async (origin) => {
-  const all = await readAll();
-  delete all[origin];
-  return writeAll(all);
-};
-
-const revokeAll = async () => writeAll({});
-
-const touch = async (origin) => {
-  const all = await readAll();
-  if (all[origin]) {
-    all[origin].lastUsedAt = Date.now();
-    await writeAll(all);
-  }
-};
-
+});
+const revoke = origin => serialized(async () => {
+  const all = await readAll(); delete all[origin]; await writeAll(all); return true;
+});
+const revokeAll = () => serialized(async () => { await writeAll({}); return true; });
+const touch = origin => serialized(async () => {
+  const all = await readAll(), entry = activeEntry(own(all, origin));
+  if (!entry) return false;
+  all[origin] = { ...entry, lastUsedAt: Date.now() }; await writeAll(all); return true;
+});
 const permissions = { storageKey, originOf, isConnected, get, list, grant, revoke, revokeAll, touch };
-
 export default permissions;

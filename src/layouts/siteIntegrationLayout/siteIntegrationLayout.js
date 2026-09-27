@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useSelector } from 'react-redux';
 import { Primitives, Zenon, utils as sdkUtils } from 'znn-ts-sdk';
@@ -8,6 +8,9 @@ import useBlockSender from '../../services/hooks/useBlockSender';
 import vault from '../../services/wallet/vault';
 import { signMessage } from '../../services/wallet/signMessage';
 import { sendInternal } from '../../services/utils/messaging';
+import { identityOf, freezeApproval, approvalEnded } from '../../services/utils/approvalIdentity';
+import withApprovalDeadline from '../../services/utils/approvalDeadline';
+import { runApprovalOperation } from '../../services/wallet/approvalOperation';
 import {
   formatAmount,
   formatExact,
@@ -116,6 +119,15 @@ const SiteIntegrationLayout = () => {
   const [preview, setPreview] = useState(null);
   const [isBusy, setIsBusy] = useState(false);
   const [isWaitingForMore, setIsWaitingForMore] = useState(false);
+  const rendered = useRef(null), operation = useRef(null), discarded = useRef(null), mounted = useRef(true), previewOwner = useRef(null);
+  rendered.current = { request, address, isUnlocked, chainIdentifier, nodeUrl };
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  const currentView = selected => mounted.current && selected?.request && discarded.current !== selected.request &&
+    selected.request.expiresAt > Date.now() &&
+    rendered.current.request === selected.request && rendered.current.isUnlocked &&
+    rendered.current.address === selected.address && rendered.current.chainIdentifier === selected.chainIdentifier &&
+    rendered.current.nodeUrl === selected.nodeUrl;
+
 
   // A locked wallet cannot answer anything. The password screen is told where
   // to come back to so the request is not lost.
@@ -145,7 +157,9 @@ const SiteIntegrationLayout = () => {
 
   const loadNext = useCallback(async () => {
     try {
-      const next = await sendInternal('approvals.next');
+      const value = await sendInternal('approvals.next');
+      if (!mounted.current) return null;
+      const next = value ? freezeApproval(value) : null;
 
       if (next) {
         setRequest(next);
@@ -157,7 +171,9 @@ const SiteIntegrationLayout = () => {
         setTimeout(resolve, CLOSE_GRACE_MS);
       });
 
-      const late = await sendInternal('approvals.next');
+      const lateValue = await sendInternal('approvals.next');
+      if (!mounted.current) return null;
+      const late = lateValue ? freezeApproval(lateValue) : null;
       setIsWaitingForMore(false);
 
       if (late) {
@@ -169,6 +185,7 @@ const SiteIntegrationLayout = () => {
       window.close();
       return null;
     } catch (err) {
+      if (!mounted.current) return null;
       setIsWaitingForMore(false);
       setRequest(null);
       return null;
@@ -181,6 +198,19 @@ const SiteIntegrationLayout = () => {
     }
   }, [isUnlocked, loadNext]);
 
+  useEffect(() => {
+    if (!request) return undefined;
+    const timer = setTimeout(() => {
+      // A saved callback and a busy SDK operation lose local authority too.
+      discarded.current = request;
+      if (!operation.current) {
+        notify.error(new Error('This approval expired. Ask the site for a new request.'));
+        loadNext();
+      }
+    }, Math.max(0, request.expiresAt - Date.now()));
+    return () => clearTimeout(timer);
+  }, [request, loadNext]);
+
   // For an arbitrary account block, what will actually be signed — with the
   // fields the SDK fills in (chain, height, previous hash) resolved, rather
   // than the bare JSON the page sent.
@@ -190,6 +220,8 @@ const SiteIntegrationLayout = () => {
       return;
     }
     let cancelled = false;
+    const controller = new AbortController();
+    previewOwner.current = controller;
 
     (async () => {
       try {
@@ -198,11 +230,9 @@ const SiteIntegrationLayout = () => {
           request.params
         );
         const keyPair = vault.getKeyPair();
-        const filled = await sdkUtils.BlockUtils._checkAndSetFields(
-          zenon,
-          template,
-          keyPair
-        );
+        const filled = await runApprovalOperation(request.expiresAt,
+          active => sdkUtils.BlockUtils._checkAndSetFields(active.context(zenon), template, keyPair),
+          { signal: controller.signal });
 
         if (!cancelled) {
           setPreview(filled.toJson());
@@ -219,121 +249,87 @@ const SiteIntegrationLayout = () => {
 
     return () => {
       cancelled = true;
+      controller.abort();
+      if (previewOwner.current === controller) previewOwner.current = null;
     };
   }, [request]);
 
-  const finish = async (id, result, grantOrigin = false) => {
-    await sendInternal('approvals.resolve', { id, result, grantOrigin });
-    await loadNext();
+  const approve = async (execute, success) => {
+    const selected = { request, address, chainIdentifier, nodeUrl };
+    if (operation.current || !currentView(selected)) return;
+    previewOwner.current?.abort();
+    const active = { kind: 'approval', selected, identity: identityOf(request), claimed: false };
+    operation.current = active;
+    setIsBusy(true);
+    const localCurrent = () => operation.current === active && currentView(selected);
+    const assertRequest = async () => {
+      if (!localCurrent() || !active.claimed) throw approvalEnded();
+      if (!(await sendInternal('approvals.checkClaim', { identity: active.identity })) || !localCurrent()) throw approvalEnded();
+    };
+    try {
+      const { id: windowId } = await chrome.windows.getCurrent();
+      if (!localCurrent()) throw approvalEnded();
+      const claim = await sendInternal('approvals.claim', { identity: active.identity, windowId });
+      if (!claim) throw approvalEnded();
+      active.identity = claim;
+      active.claimed = true;
+      await assertRequest();
+      const result = await withApprovalDeadline(execute(selected.request, assertRequest), selected.request.expiresAt);
+      await assertRequest();
+      if (!(await sendInternal('approvals.resolve', { identity: active.identity, result }))) throw approvalEnded();
+      if (success) notify.success(success);
+    } catch (error) {
+      notify.error(error);
+      // A competing popup's failed claim never consumes the winner's request.
+      if (active.claimed) {
+        try {
+          await sendInternal('approvals.reject', { identity: active.identity,
+            error: { code: -32603, message: readableError(error) } });
+        } catch (cleanupError) { notify.error(cleanupError); }
+      }
+    } finally {
+      if (operation.current === active) {
+        discarded.current = selected.request;
+        if (mounted.current) await loadNext();
+        operation.current = null;
+        if (mounted.current) setIsBusy(false);
+      }
+    }
   };
-
   const reject = async () => {
-    if (!request) {
-      return;
-    }
-    await sendInternal('approvals.reject', { id: request.id });
-    await loadNext();
-  };
-
-  //
-  // Connect
-  //
-  const approveConnect = async () => {
+    const selected = { request, address, chainIdentifier, nodeUrl };
+    if (operation.current || !currentView(selected)) return;
+    const active = { kind: 'rejection', selected };
+    operation.current = active;
+    discarded.current = request; // Invalidate copied callbacks before messaging/render.
     setIsBusy(true);
     try {
-      await finish(request.id, [address], true);
-    } finally {
-      setIsBusy(false);
+      if (!(await sendInternal('approvals.reject', { identity: identityOf(request) }))) throw approvalEnded();
+    } catch (error) { notify.error(error); }
+    finally {
+      if (operation.current === active) {
+        if (mounted.current) await loadNext();
+        operation.current = null;
+        if (mounted.current) setIsBusy(false);
+      }
     }
   };
 
-  //
-  // Send a plain transfer
-  //
-  const tokenFor = (tokenStandard) => balanceMap[tokenStandard];
-
-  const approveSendTransaction = async () => {
-    setIsBusy(true);
-
-    try {
-      const { to, tokenStandard, amount } = request.params;
-      const template = Primitives.AccountBlockTemplate.send(
-        Primitives.Address.parse(to),
-        Primitives.TokenStandard.parse(tokenStandard),
-        amount
-      );
-      const signed = await send(template);
-
-      await finish(request.id, {
-        hash: signed.hash?.toString(),
-        block: signed.toJson?.() ?? null,
-      });
-      notify.success('Transaction sent');
-    } catch (err) {
-      notify.error(err);
-      await sendInternal('approvals.reject', {
-        id: request.id,
-        error: { code: -32603, message: readableError(err) },
-      });
-      await loadNext();
-    } finally {
-      setIsBusy(false);
-    }
-  };
-
-  //
-  // Sign a message
-  //
-  // The only approval here that does not touch the network: no plasma, no
-  // block, nothing to broadcast. It is over as fast as an Ed25519 signature,
-  // and the site gets the answer the moment the button is pressed.
-  //
-  const approveSignMessage = async () => {
-    setIsBusy(true);
-
-    try {
-      const signed = await signMessage(request.params.message);
-
-      await finish(request.id, signed);
-      notify.success('Message signed');
-    } catch (err) {
-      notify.error(err);
-      await sendInternal('approvals.reject', {
-        id: request.id,
-        error: { code: -32603, message: readableError(err) },
-      });
-      await loadNext();
-    } finally {
-      setIsBusy(false);
-    }
-  };
-
-  //
-  // Sign and send an arbitrary block
-  //
-  const approveSignAndSend = async () => {
-    setIsBusy(true);
-
-    try {
-      const template = Primitives.AccountBlockTemplate.fromJson(request.params);
-      const signed = await send(template);
-
-      await finish(request.id, {
-        hash: signed.hash?.toString(),
-        block: signed.toJson?.() ?? null,
-      });
-      notify.success('Block sent');
-    } catch (err) {
-      notify.error(err);
-      await sendInternal('approvals.reject', {
-        id: request.id,
-        error: { code: -32603, message: readableError(err) },
-      });
-      await loadNext();
-    } finally {
-      setIsBusy(false);
-    }
-  };
+  const tokenFor = tokenStandard => balanceMap[tokenStandard];
+  const approveConnect = () => approve(async () => [address]);
+  const blockResult = signed => ({ hash: signed.hash?.toString(), block: signed.toJson?.() ?? null });
+  const approveSendTransaction = () => approve(async (selected, assertRequest) => {
+    const { to, tokenStandard, amount } = selected.params;
+    const template = Primitives.AccountBlockTemplate.send(Primitives.Address.parse(to), Primitives.TokenStandard.parse(tokenStandard), amount);
+    return blockResult(await send(template, { assertRequest, expiresAt: selected.expiresAt }));
+  }, 'Transaction sent');
+  const approveSignMessage = () => approve((selected, assertRequest) =>
+    runApprovalOperation(selected.expiresAt, active => signMessage(selected.params.message, { assertRequest: active.assertActive }),
+      { assertRequest }), 'Message signed');
+  const approveSignAndSend = () => approve(async (selected, assertRequest) => {
+    const template = Primitives.AccountBlockTemplate.fromJson(selected.params);
+    return blockResult(await send(template, { assertRequest, expiresAt: selected.expiresAt }));
+  }, 'Block sent');
 
   if (request === undefined) {
     return (
@@ -393,6 +389,8 @@ const SiteIntegrationLayout = () => {
   return (
     <div className="page approval-screen">
       <SiteHeader request={request} />
+      <p className="approval-note">This request expires at {new Date(request.expiresAt).toLocaleTimeString()}.</p>
+      {busy && operation.current?.kind === 'approval' && <p className="approval-note" role="status">Your approval is being processed and can no longer be rejected.</p>}
 
       {request.type === 'connect' && (
         <>
@@ -419,6 +417,7 @@ const SiteIntegrationLayout = () => {
               type="button"
               className="button secondary w-100"
               onClick={reject}
+              disabled={busy}
             >
               Cancel
             </button>
@@ -492,6 +491,7 @@ const SiteIntegrationLayout = () => {
               type="button"
               className="button secondary w-100"
               onClick={reject}
+              disabled={busy}
             >
               Reject
             </button>
@@ -532,6 +532,7 @@ const SiteIntegrationLayout = () => {
               type="button"
               className="button secondary w-100"
               onClick={reject}
+              disabled={busy}
             >
               Reject
             </button>
@@ -652,6 +653,7 @@ const SiteIntegrationLayout = () => {
               type="button"
               className="button secondary w-100"
               onClick={reject}
+              disabled={busy}
             >
               Reject
             </button>

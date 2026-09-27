@@ -1,7 +1,10 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import { Enums, Zenon } from 'znn-ts-sdk';
 
 import vault from '../wallet/vault';
+import requestSigningKey from '../wallet/requestSigningKey';
+import { runApprovalOperation } from '../wallet/approvalOperation';
+import sendApprovalBlock from '../wallet/approvalBlock';
 import { invalidateAccountCache } from './useAccount';
 
 // Signing and broadcasting one account block, for the one caller that has to
@@ -26,33 +29,39 @@ import { invalidateAccountCache } from './useAccount';
 
 const useBlockSender = () => {
   const [isSending, setIsSending] = useState(false);
+  const generation = useRef(0);
   const [isGeneratingPlasma, setIsGeneratingPlasma] = useState(false);
 
-  const send = useCallback(async (template, { addressIndex } = {}) => {
+  const send = useCallback(async (template, { addressIndex, assertRequest, expiresAt } = {}) => {
+    const current = ++generation.current;
     const zenon = Zenon.getSingleton();
-    const keyPair = await vault.getSigningKeyPair(addressIndex);
-
     setIsSending(true);
-
+    const progress = status => {
+      if (generation.current !== current || (Number.isFinite(expiresAt) && expiresAt <= Date.now())) return;
+      if (status === Enums.PowStatus.generating) setIsGeneratingPlasma(true);
+      if (status === Enums.PowStatus.done) setIsGeneratingPlasma(false);
+    };
     try {
-      const signed = await zenon.send(template, keyPair, (status) => {
-        // `PowStatus.generating` is 0, so this has to compare rather than test
-        // for truth — the obvious `if (status)` reads it as "done".
-        if (status === Enums.PowStatus.generating) {
-          setIsGeneratingPlasma(true);
-        }
-        if (status === Enums.PowStatus.done) {
-          setIsGeneratingPlasma(false);
-        }
-      });
+      const execute = async operation => {
+        await operation.assertActive();
+        const keyPair = requestSigningKey(await vault.getSigningKeyPair(addressIndex), operation.assertActive);
+        await operation.assertActive();
+        return sendApprovalBlock(zenon, template, keyPair, operation, progress);
+      };
+      const signed = assertRequest
+        ? await runApprovalOperation(expiresAt, execute, { assertRequest })
+        : await zenon.send(template, await vault.getSigningKeyPair(addressIndex), progress);
 
       // The balance on screen is now stale by definition.
       invalidateAccountCache();
+      await assertRequest?.();
       return signed;
     } finally {
       // In `finally`, so an error cannot leave the screen saying it is working.
-      setIsGeneratingPlasma(false);
-      setIsSending(false);
+      if (generation.current === current) {
+        setIsGeneratingPlasma(false);
+        setIsSending(false);
+      }
     }
   }, []);
 

@@ -1,6 +1,8 @@
 import frames from './frames';
 import permissions from './permissions';
 import requests from './requests';
+import { identityOf } from '../../services/utils/approvalIdentity';
+import { limits, validateEnvelope, busy } from '../../services/utils/approvalLimits';
 
 // The service worker.
 //
@@ -10,12 +12,9 @@ import requests from './requests';
 // needs to answer a site is published by the popup into `chrome.storage.session`
 // as plain, non-secret state.
 //
-// Nothing here keeps state in a module-level variable. Under manifest v3 this
-// file runs as a worker that Chrome unloads whenever it feels like it, and an
-// approval that takes a person thirty seconds outlives that easily. The
-// previous version cached the wallet password in a `const` up here, which both
-// evaporated at random and answered `internal.getCredentialsFromBackgroundScript`
-// for any sender at all.
+// Pending authority lives in session storage. A synchronous handler count
+// bounds transient worker work before its first await; it contains no secrets.
+let activeProviderHandlers = 0;
 
 const unlockKey = 'znn.unlock';
 const publicStateKey = 'znn.publicState';
@@ -31,10 +30,13 @@ const maxSignMessageLength = 8192;
 //
 const errors = {
   userRejected: { code: 4001, message: 'User rejected the request' },
+  approvalInterrupted: { code: -32603, message: 'Approval window closed after approval began. The outcome is unknown; verify the result before retrying.' },
   unauthorized: { code: 4100, message: 'The site is not connected to this wallet' },
   unsupportedMethod: { code: 4200, message: 'Unsupported method' },
   disconnected: { code: 4900, message: 'The wallet is locked' },
   internal: { code: -32603, message: 'Internal error' },
+  expired: { code: -32006, message: 'The approval expired. Submit a new request.' },
+  expiredClaim: { code: -32603, message: 'The approval expired after processing began. The outcome is unknown; verify the result before retrying.' },
 };
 
 // A malformed call, said in the caller's own terms. `-32602` is JSON-RPC's
@@ -91,17 +93,28 @@ const getPublicState = async () => {
 //
 // Talking back to pages
 //
-const sendToTab = async (tabId, message, frameId) => {
+const sendToTab = async (tabId, message, frameId, documentId) => {
   try {
-    await chrome.tabs.sendMessage(tabId, message, frameId === undefined ? {} : { frameId });
+    let timer;
+    try {
+      return await Promise.race([
+        chrome.tabs.sendMessage(tabId, message, { ...(frameId === undefined ? {} : { frameId }), ...(documentId ? { documentId } : {}) }),
+        new Promise(resolve => { timer = setTimeout(resolve, 5000); }),
+      ]);
+    } finally { clearTimeout(timer); }
   } catch (err) {
     // The tab navigated away or closed. Nothing to deliver to and nothing to
     // do about it.
   }
 };
 
-const respond = (target, id, result, error) =>
-  sendToTab(target.tabId, { channel: 'znn', kind: 'response', id, result, error }, target.frameId);
+const respond = (target, id, result, error) => {
+  if (typeof target.documentId !== 'string' || !target.documentId) return false;
+  return sendToTab(target.tabId, { channel: 'znn', kind: 'response', id, result, error, expiresAt: target.expiresAt }, target.frameId, target.documentId);
+};
+
+requests.onExpired(removed => Promise.all(removed.map(request =>
+  respond(request, request.responseId, undefined, request.claimId ? errors.expiredClaim : errors.expired))));
 
 // Fans an event out to every frame whose origin is connected, so a site sees
 // an address or chain change without polling.
@@ -125,23 +138,25 @@ const broadcast = async (event, data) => {
 // Queuing something for a person to approve
 //
 const queueApproval = async (type, { id, target, origin, sender, params }) => {
-  await requests.add({
-    id,
+  const queued = await requests.add({
+    responseId: id,
     type,
     params: params || {},
     origin,
     tabId: target.tabId,
     frameId: target.frameId,
+    documentId: target.documentId,
     title: sender.tab?.title || '',
     favicon: sender.tab?.favIconUrl || '',
     createdAt: Date.now(),
   });
-  // Stamped with the window it is actually shown in, so that closing that
-  // window answers for this request and for no other. See requests.attachWindow
-  // — without it, a request queued in the gap between one window closing and
-  // the next opening was rejected as "user rejected" without ever being drawn.
-  const windowId = await requests.openApprovalWindow();
-  await requests.attachWindow(id, windowId);
+  const identity = identityOf(queued);
+  try {
+    if (!(await requests.present(identity))) throw new Error('The approval window is no longer available.');
+  } catch (error) {
+    await requests.reject(identity);
+    throw error;
+  }
 };
 
 //
@@ -230,15 +245,15 @@ const providerMethods = {
 
 const handleProviderRequest = async (request, sender) => {
   const origin = permissions.originOf(sender);
-  const target = { tabId: sender.tab.id, frameId: sender.frameId ?? 0 };
+  const target = { tabId: sender.tab.id, frameId: sender.frameId ?? 0, documentId: sender.documentId };
   const { id, method, params } = request;
 
-  if (!origin) {
+  if (!origin || typeof target.documentId !== 'string' || !target.documentId) {
     await respond(target, id, undefined, errors.internal);
     return;
   }
 
-  const handler = providerMethods[method];
+  const handler = Object.hasOwn(providerMethods, method) ? providerMethods[method] : null;
 
   if (!handler) {
     await respond(target, id, undefined, errors.unsupportedMethod);
@@ -258,7 +273,8 @@ const handleProviderRequest = async (request, sender) => {
     }
     await respond(target, id, outcome);
   } catch (err) {
-    const error = err && err.code ? err : { ...errors.internal, message: err?.message || 'Internal error' };
+    const error = { code: Number.isFinite(err?.code) ? err.code : errors.internal.code,
+      message: err?.message || 'Internal error' };
     await respond(target, id, undefined, error);
   }
 };
@@ -271,26 +287,39 @@ const internalMethods = {
   'approvals.list': () => requests.list(),
   'approvals.next': () => requests.oldest(),
 
-  'approvals.resolve': async ({ id, result, grantOrigin }) => {
-    const request = await requests.remove(id);
-
-    if (!request) {
+  'approvals.claim': ({ identity, windowId }) => requests.claim(identity, windowId),
+  'approvals.checkClaim': ({ identity }) => requests.checkClaim(identity),
+  'approvals.resolve': async ({ identity, result }) => {
+    const request = await requests.resolve(identity);
+    if (!request) return false;
+    const checkDeadline = () => {
+      if (Date.now() >= request.expiresAt) throw new Error('Approval expired during finalization.');
+    };
+    let delivery;
+    const complete = () => { checkDeadline(); delivery = respond(request, request.responseId, result); return delivery; };
+    try {
+      checkDeadline();
+      // Save this optional convenience before permission activation. A held
+      // window lock or storage write must not leave a new grant behind.
+      try { await requests.allowFollowup(request.origin, request.expiresAt); }
+      catch (error) { console.error('Unable to save approval follow-up allowance', error); }
+      checkDeadline();
+      if (request.type === 'connect') {
+        if (!(await permissions.grant(request.origin, { title: request.title, favicon: request.favicon },
+          { expiresAt: request.expiresAt, confirm: complete }))) throw new Error('The connection permission could not be saved.');
+      } else complete();
+      await delivery;
+      return true;
+    } catch (error) {
+      await respond(request, request.responseId, undefined, Date.now() >= request.expiresAt
+        ? errors.expiredClaim : { ...errors.internal, message: error.message });
       return false;
     }
-    if (grantOrigin) {
-      await permissions.grant(request.origin, { title: request.title, favicon: request.favicon });
-    }
-    await respond(request, id, result);
-    return true;
   },
-
-  'approvals.reject': async ({ id, error }) => {
-    const request = await requests.remove(id);
-
-    if (!request) {
-      return false;
-    }
-    await respond(request, id, undefined, error || errors.userRejected);
+  'approvals.reject': async ({ identity, error }) => {
+    const request = await requests.reject(identity);
+    if (!request) return false;
+    await respond(request, request.responseId, undefined, error || errors.userRejected);
     return true;
   },
 
@@ -357,7 +386,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (!isFromContentScript(sender)) {
       return false;
     }
-    handleProviderRequest(message, sender);
+    try {
+      if (activeProviderHandlers >= limits.activeHandlers) throw busy();
+      validateEnvelope(message);
+    } catch (error) {
+      // Reply through this bounded transport callback; do not enqueue another
+      // asynchronous tabs message for rejected admission. The relay translates it.
+      sendResponse({ error: { code: error.code || -32602, message: error.message } });
+      return false;
+    }
+    activeProviderHandlers++;
+    handleProviderRequest(message, sender)
+      .catch(error => console.error('Unable to handle wallet request', error))
+      .finally(() => { activeProviderHandlers--; });
     // Answered later over `chrome.tabs.sendMessage`, not through this callback:
     // an approval outlives the message channel and, often, the worker itself.
     sendResponse({ accepted: true });
@@ -400,25 +441,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 // prompt that never appeared, and it did so every time, on the first attempt,
 // for exactly the connect-then-sign shape every site uses.
 chrome.windows.onRemoved.addListener(async (windowId) => {
-  // Snapshotted before anything is awaited on the window itself, so a request
-  // queued during this handler is not in the list it answers for.
-  const pending = await requests.list();
-  const abandoned = pending.filter((request) => request.windowId === windowId);
-
-  // Compare-and-clear: a replacement window may already have claimed the slot.
-  await requests.forgetWindow(windowId);
-
-  await Promise.all(
-    abandoned.map(async (request) => {
-      await requests.remove(request.id);
-      await respond(request, request.id, undefined, errors.userRejected);
-    })
-  );
+  try {
+    const abandoned = await requests.closeWindow(windowId);
+    // A claimed operation may already have reached publication. Closing its
+    // window cannot promise cancellation or invite an automatic retry.
+    await Promise.all(abandoned.map(request => respond(request, request.responseId, undefined,
+      request.claimId ? errors.approvalInterrupted : errors.userRejected)));
+  } catch (error) {
+    // Storage failure cannot be treated as a successful removal or approval.
+    console.error('Unable to close pending wallet approvals', error);
+  }
 });
 
 // A closed tab has no frames left to deliver to.
 chrome.tabs.onRemoved.addListener((tabId) => {
   frames.forgetTab(tabId);
+  requests.forgetTab(tabId).catch(error => console.error('Unable to clear closed-tab approvals', error));
 });
 
 // The popup enforces the auto-lock whenever it opens, but the popup is usually
@@ -437,6 +475,8 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name !== autoLockAlarm) {
     return;
   }
+  try { await requests.prune(); }
+  catch (error) { console.error('Unable to expire wallet approvals', error); }
   const unlock = await readSession(unlockKey);
 
   if (unlock && (!unlock.expiresAt || Date.now() > unlock.expiresAt)) {

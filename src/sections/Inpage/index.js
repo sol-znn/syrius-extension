@@ -32,22 +32,21 @@
     return `znn-${Date.now().toString(36)}-${requestCounter}`;
   };
 
-  // A request that is waiting on a person has no useful deadline — somebody may
-  // be looking for their password — so only the transport is bounded. If the
-  // content script never answers at all, the promise still settles.
+  // Human approval lasts up to 30 minutes. One extra minute permits worker
+  // alarm delivery; this fallback also settles a lost transport or worker.
   const transportTimeoutMs = 30000;
 
   const request = ({ method, params }) =>
     new Promise((resolve, reject) => {
+      if (pending.size >= 32) { reject({ code: -32005, message: 'Too many wallet requests. Wait and retry.' }); return; }
       const id = nextId();
       const needsApproval = method !== 'znn_accounts' && method !== 'znn_chainId' && method !== 'znn_nodeUrl';
 
-      const timer = needsApproval
-        ? null
-        : setTimeout(() => {
+      const timer = setTimeout(() => {
             pending.delete(id);
-            reject({ code: 4900, message: 'The wallet did not respond' });
-          }, transportTimeoutMs);
+            reject({ code: 4900, message: needsApproval
+              ? 'The wallet did not finish. Verify the outcome before retrying.' : 'The wallet did not respond' });
+          }, needsApproval ? 31 * 60 * 1000 : transportTimeoutMs);
 
       pending.set(id, { resolve, reject, timer });
       window.postMessage({ target: outboundTarget, kind: 'request', id, method, params }, window.location.origin);
@@ -91,7 +90,9 @@
       if (waiting.timer) {
         clearTimeout(waiting.timer);
       }
-      if (message.error) {
+      if (!message.error && Number.isFinite(message.expiresAt) && (!Number.isFinite(message.acceptedAt) || message.acceptedAt >= message.expiresAt)) {
+        waiting.reject({ code: -32603, message: 'Approval expired. Verify the outcome before retrying.' });
+      } else if (message.error) {
         waiting.reject(message.error);
       } else {
         waiting.resolve(message.result);
