@@ -2,6 +2,7 @@ import { useCallback, useState } from 'react';
 import { Enums, Zenon } from 'znn-ts-sdk';
 
 import vault from '../wallet/vault';
+import { sendBlockApproval } from '../wallet/blockApproval';
 import { invalidateAccountCache } from './useAccount';
 
 // Signing and broadcasting one account block, for the one caller that has to
@@ -56,7 +57,21 @@ const useBlockSender = () => {
     }
   }, []);
 
-  return { send, isSending, isGeneratingPlasma };
+  const sendPrepared = useCallback(async (approval) => {
+    setIsSending(true);
+    try {
+      const signed = await sendBlockApproval(approval, (status) => {
+        setIsGeneratingPlasma(status === Enums.PowStatus.generating);
+      });
+      invalidateAccountCache();
+      return signed;
+    } finally {
+      setIsGeneratingPlasma(false);
+      setIsSending(false);
+    }
+  }, []);
+
+  return { send, sendPrepared, isSending, isGeneratingPlasma };
 };
 
 export default useBlockSender;

@@ -270,9 +270,10 @@ const internalMethods = {
   // The approval screens ask what they are being opened for.
   'approvals.list': () => requests.list(),
   'approvals.next': () => requests.oldest(),
+  'approvals.claimBlock': ({ id, ...claim }) => requests.claimBlock(id, claim),
 
-  'approvals.resolve': async ({ id, result, grantOrigin }) => {
-    const request = await requests.remove(id);
+  'approvals.resolve': async ({ id, result, grantOrigin, approvalId, claimId }) => {
+    const request = await requests.remove(id, { approvalId, claimId });
 
     if (!request) {
       return false;
@@ -284,8 +285,8 @@ const internalMethods = {
     return true;
   },
 
-  'approvals.reject': async ({ id, error }) => {
-    const request = await requests.remove(id);
+  'approvals.reject': async ({ id, error, approvalId, claimId }) => {
+    const request = await requests.remove(id, { approvalId, claimId });
 
     if (!request) {
       return false;
@@ -410,8 +411,8 @@ chrome.windows.onRemoved.addListener(async (windowId) => {
 
   await Promise.all(
     abandoned.map(async (request) => {
-      await requests.remove(request.id);
-      await respond(request, request.id, undefined, errors.userRejected);
+      const removed = await requests.remove(request.id, request);
+      if (removed) await respond(removed, removed.id, undefined, errors.userRejected);
     })
   );
 });

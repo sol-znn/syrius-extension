@@ -13,46 +13,58 @@
 const pendingKey = 'znn.pendingRequests';
 const windowKey = 'znn.approvalWindowId';
 
+// All whole-map writers share an origin-wide lock. A per-worker promise queue
+// would not survive a worker restart or coordinate another extension context.
+const withPending = (operation) => navigator.locks.request('znn.pendingRequests', operation);
+
 const readPending = async () => {
-  try {
-    const stored = await chrome.storage.session.get(pendingKey);
-    return stored[pendingKey] || {};
-  } catch (err) {
-    return {};
-  }
+  const stored = await chrome.storage.session.get(pendingKey);
+  return stored[pendingKey] || {};
 };
 
-const writePending = async (pending) => {
-  try {
-    await chrome.storage.session.set({ [pendingKey]: pending });
-  } catch (err) {
-    // If session storage is unavailable the request cannot be tracked; the
-    // caller's timeout is what recovers it.
-  }
-};
+// A claim must never succeed unless its single-use state was persisted.
+const writePending = (pending) => chrome.storage.session.set({ [pendingKey]: pending });
 
 const list = async () => {
   const pending = await readPending();
   return Object.values(pending).sort((a, b) => a.createdAt - b.createdAt);
 };
 
-const oldest = async () => (await list())[0] || null;
+const oldest = async () => (await list()).find((request) => !request.claimId) || null;
 
 const get = async (id) => (await readPending())[id] || null;
 
-const add = async (request) => {
+const add = (request) => withPending(async () => {
   const pending = await readPending();
-  pending[request.id] = request;
+  pending[request.id] = { ...request, approvalId: crypto.randomUUID() };
   await writePending(pending);
-};
+});
 
-const remove = async (id) => {
+const remove = (id, { approvalId, claimId } = {}) => withPending(async () => {
   const pending = await readPending();
   const request = pending[id];
+  if (!request || (approvalId && request.approvalId !== approvalId) ||
+      (request.claimId && request.claimId !== claimId)) return null;
   delete pending[id];
   await writePending(pending);
-  return request || null;
-};
+  return request;
+});
+
+// Two popups may display the same request. Only one can consume its block
+// approval, and only that claimant can subsequently settle or reject it.
+// The queue-generated identity distinguishes replacement records with the
+// same page-supplied id; it is captured with the preview, never read at click.
+const claimBlock = (id, { approvalId, claimId, windowId }) => withPending(async () => {
+  const pending = await readPending();
+  const request = pending[id];
+  if (!approvalId || !claimId || !Number.isInteger(windowId) ||
+      !request || request.type !== 'signAndSendBlock' || request.claimId ||
+      request.approvalId !== approvalId) return false;
+  request.claimId = claimId;
+  request.windowId = windowId;
+  await writePending(pending);
+  return true;
+});
 
 // Records which approval window a request was actually put in front of.
 //
@@ -70,16 +82,16 @@ const remove = async (id) => {
 // A request that has not been stamped yet is deliberately left alone by that
 // handler. It is the safe direction: an unstamped request waits for a window of
 // its own, where the worst case is a prompt the person can decline themselves.
-const attachWindow = async (id, windowId) => {
+const attachWindow = (id, windowId) => withPending(async () => {
   const pending = await readPending();
 
-  if (!pending[id]) {
+  if (!pending[id] || pending[id].claimId) {
     return false;
   }
   pending[id].windowId = windowId;
   await writePending(pending);
   return true;
-};
+});
 
 //
 // The approval window
@@ -188,6 +200,7 @@ const requests = {
   get,
   add,
   remove,
+  claimBlock,
   attachWindow,
   getWindowId,
   setWindowId,

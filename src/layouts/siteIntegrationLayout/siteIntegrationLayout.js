@@ -1,11 +1,11 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useSelector } from 'react-redux';
-import { Primitives, Zenon, utils as sdkUtils } from 'znn-ts-sdk';
+import { Primitives } from 'znn-ts-sdk';
 
 import useAccount from '../../services/hooks/useAccount';
 import useBlockSender from '../../services/hooks/useBlockSender';
-import vault from '../../services/wallet/vault';
+import { prepareBlockApproval, isCurrentBlockApproval } from '../../services/wallet/blockApproval';
 import { signMessage } from '../../services/wallet/signMessage';
 import { sendInternal } from '../../services/utils/messaging';
 import {
@@ -110,12 +110,20 @@ const SiteIntegrationLayout = () => {
     (state) => state.connectionParameters
   );
   const { balanceMap } = useAccount();
-  const { send, isSending, isGeneratingPlasma } = useBlockSender();
+  const { send, sendPrepared, isSending, isGeneratingPlasma } = useBlockSender();
 
   const [request, setRequest] = useState(undefined);
   const [preview, setPreview] = useState(null);
   const [isBusy, setIsBusy] = useState(false);
   const [isWaitingForMore, setIsWaitingForMore] = useState(false);
+  const live = useRef();
+  live.current = { request, address, chainIdentifier, nodeUrl, isUnlocked };
+  const activePreparation = useRef(null);
+  const approvalInFlight = useRef(false);
+
+  useEffect(() => () => {
+    activePreparation.current = null;
+  }, []);
 
   // A locked wallet cannot answer anything. The password screen is told where
   // to come back to so the request is not lost.
@@ -145,6 +153,8 @@ const SiteIntegrationLayout = () => {
 
   const loadNext = useCallback(async () => {
     try {
+      activePreparation.current = null;
+      setPreview(null);
       const next = await sendInternal('approvals.next');
 
       if (next) {
@@ -181,57 +191,47 @@ const SiteIntegrationLayout = () => {
     }
   }, [isUnlocked, loadNext]);
 
-  // For an arbitrary account block, what will actually be signed — with the
-  // fields the SDK fills in (chain, height, previous hash) resolved, rather
-  // than the bare JSON the page sent.
+  // A prepared approval belongs to one request and one live wallet context.
+  // Identity checks in rendering and submission also cover the render before
+  // this effect runs, so clearing state in the effect is not the only guard.
   useEffect(() => {
-    if (!request || request.type !== 'signAndSendBlock') {
-      setPreview(null);
-      return;
-    }
-    let cancelled = false;
-
-    (async () => {
-      try {
-        const zenon = Zenon.getSingleton();
-        const template = Primitives.AccountBlockTemplate.fromJson(
-          request.params
-        );
-        const keyPair = vault.getKeyPair();
-        const filled = await sdkUtils.BlockUtils._checkAndSetFields(
-          zenon,
-          template,
-          keyPair
-        );
-
-        if (!cancelled) {
-          setPreview(filled.toJson());
-        }
-      } catch (err) {
-        if (!cancelled) {
-          // Falling back to what the site sent is better than a blank panel:
-          // the point of this screen is that the block is visible before it is
-          // signed.
-          setPreview(request.params);
-        }
+    const token = {};
+    activePreparation.current = token;
+    setPreview(null);
+    if (!request || request.type !== 'signAndSendBlock' || !isUnlocked) return undefined;
+    const isCurrent = () => activePreparation.current === token &&
+      live.current.request === request && live.current.address === address &&
+      live.current.chainIdentifier === chainIdentifier && live.current.nodeUrl === nodeUrl &&
+      live.current.isUnlocked;
+    prepareBlockApproval(request.params, { address, nodeUrl, isCurrent }).then(
+      (approval) => {
+        if (isCurrent()) setPreview({ request, approval });
+      },
+      (error) => {
+        if (isCurrent()) setPreview({ request, error: readableError(error) });
       }
-    })();
-
+    );
     return () => {
-      cancelled = true;
+      if (activePreparation.current === token) activePreparation.current = null;
     };
-  }, [request]);
+  }, [request, address, chainIdentifier, nodeUrl, isUnlocked]);
 
-  const finish = async (id, result, grantOrigin = false) => {
-    await sendInternal('approvals.resolve', { id, result, grantOrigin });
+  const approval = preview && preview.request === request ? preview.approval : null;
+  const approvalReady = isCurrentBlockApproval(approval);
+  const preparedBlock = approval && (approvalReady || approvalInFlight.current) ? approval.block : null;
+
+  const finish = async (id, result, grantOrigin = false, identity = {}) => {
+    await sendInternal('approvals.resolve', { id, result, grantOrigin, ...identity });
     await loadNext();
   };
 
   const reject = async () => {
-    if (!request) {
+    if (!request || approvalInFlight.current) {
       return;
     }
-    await sendInternal('approvals.reject', { id: request.id });
+    activePreparation.current = null;
+    setPreview(null);
+    await sendInternal('approvals.reject', { id: request.id, approvalId: request.approvalId });
     await loadNext();
   };
 
@@ -312,25 +312,35 @@ const SiteIntegrationLayout = () => {
   // Sign and send an arbitrary block
   //
   const approveSignAndSend = async () => {
+    if (approvalInFlight.current || !isCurrentBlockApproval(approval)) return;
+    approvalInFlight.current = true;
     setIsBusy(true);
-
+    const approvedRequest = request;
+    const identity = { approvalId: approvedRequest.approvalId, claimId: crypto.randomUUID() };
+    let claimed = false;
     try {
-      const template = Primitives.AccountBlockTemplate.fromJson(request.params);
-      const signed = await send(template);
-
-      await finish(request.id, {
+      const { id: windowId } = await chrome.windows.getCurrent();
+      claimed = await sendInternal('approvals.claimBlock', {
+        id: approvedRequest.id, ...identity, windowId,
+      });
+      if (!claimed) throw new Error('This request was already answered or changed.');
+      const signed = await sendPrepared(approval);
+      await finish(approvedRequest.id, {
         hash: signed.hash?.toString(),
         block: signed.toJson?.() ?? null,
-      });
+      }, false, identity);
       notify.success('Block sent');
     } catch (err) {
       notify.error(err);
-      await sendInternal('approvals.reject', {
-        id: request.id,
-        error: { code: -32603, message: readableError(err) },
-      });
+      if (claimed) {
+        await sendInternal('approvals.reject', {
+          id: approvedRequest.id, ...identity,
+          error: { code: -32603, message: readableError(err) },
+        });
+      }
       await loadNext();
     } finally {
+      approvalInFlight.current = false;
       setIsBusy(false);
     }
   };
@@ -368,7 +378,7 @@ const SiteIntegrationLayout = () => {
   // plain transfer and an arbitrary block; a contract call with no value has an
   // amount of zero and never trips it.
   const shortfall = (() => {
-    const { tokenStandard, amount } = request.params || {};
+    const { tokenStandard, amount } = (request.type === 'signAndSendBlock' ? preparedBlock : request.params) || {};
     const wanted = toBigNumber(amount);
 
     if (wanted.isZero()) {
@@ -419,6 +429,7 @@ const SiteIntegrationLayout = () => {
               type="button"
               className="button secondary w-100"
               onClick={reject}
+              disabled={busy}
             >
               Cancel
             </button>
@@ -492,6 +503,7 @@ const SiteIntegrationLayout = () => {
               type="button"
               className="button secondary w-100"
               onClick={reject}
+              disabled={busy}
             >
               Reject
             </button>
@@ -532,6 +544,7 @@ const SiteIntegrationLayout = () => {
               type="button"
               className="button secondary w-100"
               onClick={reject}
+              disabled={busy}
             >
               Reject
             </button>
@@ -552,8 +565,8 @@ const SiteIntegrationLayout = () => {
           <div className="approval-body">
             <h2 className="approval-title">Sign this block?</h2>
 
-            {(() => {
-              const json = preview ?? request.params;
+            {preparedBlock ? (() => {
+              const json = preparedBlock;
               const info = describeBlock(json, tokenFor);
               const amountRow = info.hasAmount && (
                 <>
@@ -631,14 +644,35 @@ const SiteIntegrationLayout = () => {
                   </dl>
                 </>
               );
-            })()}
+            })() : (
+              <p className="approval-warning" role="status">
+                {preview?.request === request && preview.error
+                  ? `Unable to prepare this block: ${preview.error}`
+                  : preview?.request === request && preview.approval
+                    ? 'The wallet or connection changed. Reject this request and review a new one.'
+                    : 'Preparing this block for review…'}
+              </p>
+            )}
 
-            <details className="block-preview-details">
-              <summary>Raw transaction data</summary>
-              <pre className="block-preview">
-                {JSON.stringify(preview ?? request.params, null, 2)}
-              </pre>
-            </details>
+            {preparedBlock && (
+              <>
+                <dl className="confirm-details">
+                  <dt>Signing as</dt>
+                  <dd className="word-break-all">{preparedBlock.address}</dd>
+                  <dt>Chain</dt>
+                  <dd>{JSON.stringify(preparedBlock.chainIdentifier)}</dd>
+                  <dt>Node</dt>
+                  <dd className="word-break-all">{approval.nodeUrl}</dd>
+                </dl>
+                <details className="block-preview-details">
+                  <summary>Raw transaction data</summary>
+                  <pre className="block-preview">
+                    {JSON.stringify(approval.details, null, 2)}
+                  </pre>
+                </details>
+                <p className="approval-note">Plasma proof, transaction hash and signature are generated after approval.</p>
+              </>
+            )}
 
             {shortfall && (
               <p className="approval-warning" role="alert">
@@ -652,6 +686,7 @@ const SiteIntegrationLayout = () => {
               type="button"
               className="button secondary w-100"
               onClick={reject}
+              disabled={busy}
             >
               Reject
             </button>
@@ -659,7 +694,7 @@ const SiteIntegrationLayout = () => {
               type="button"
               className="button warning w-100"
               onClick={approveSignAndSend}
-              disabled={busy || Boolean(shortfall)}
+              disabled={busy || !approvalReady || Boolean(shortfall)}
             >
               {busy ? busyLabel : 'Sign and send'}
             </button>
