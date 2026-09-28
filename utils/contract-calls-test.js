@@ -36,7 +36,9 @@ const load = (file) => {
 const { decodeCall, describeCall, selectorOf } = load('src/services/utils/contractCalls.js');
 
 // go-zenon's definitions, parsed from source rather than copied.
-const definitionDir = path.join(__dirname, '..', '..', 'go-zenon', 'vm', 'embedded', 'definition');
+const definitionDir = process.env.GO_ZENON_ABI_DIR
+  ? path.resolve(process.env.GO_ZENON_ABI_DIR)
+  : path.join(__dirname, '..', '..', 'go-zenon', 'vm', 'embedded', 'definition');
 const fileForContract = {
   plasma: 'plasma.go',
   pillar: 'pillars.go',
@@ -68,6 +70,9 @@ const signaturesFrom = (file) => {
       found.push({ method: entry.name, signature: `${entry.name}(${types})` });
     }
   }
+  if (!found.length) {
+    throw new Error(`No ABI functions found in ${file}`);
+  }
   return found;
 };
 
@@ -76,8 +81,10 @@ const blockDataFor = (signature) =>
   Buffer.from(selectorOf(signature), 'hex').toString('base64');
 
 if (!fs.existsSync(definitionDir)) {
-  console.log('go-zenon not found at ../go-zenon — skipping');
-  process.exit(0);
+  throw new Error(
+    'go-zenon ABI definitions are required. Set GO_ZENON_ABI_DIR to ' +
+    'vm/embedded/definition in a pinned go-zenon checkout (see SETUP.md).'
+  );
 }
 
 let checked = 0;

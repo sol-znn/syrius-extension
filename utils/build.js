@@ -21,6 +21,7 @@ webpack(config, function (err, stats) {
   if (stats.hasErrors()) {
     console.error('Build errors:');
     console.error(stats.toString({ colors: true }));
+    process.exitCode = 1;
     return;
   }
   

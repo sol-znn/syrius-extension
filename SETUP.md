@@ -23,13 +23,27 @@ git clone https://github.com/MichZNN/syrius-extension.git
 Set-Location syrius-extension
 & 'C:\Program Files\nodejs\npm.cmd' ci --legacy-peer-deps
 & 'C:\Program Files\nodejs\npm.cmd' run lint
+
+# Create a separate source-only checkout for the embedded ABI comparator.
+git clone --no-checkout https://github.com/zenon-network/go-zenon.git ../go-zenon-abi
+git -C ../go-zenon-abi checkout --detach 667a69d9e9a418edf7580b08492ba5dcb9efd63a
+$env:GO_ZENON_ABI_DIR = '../go-zenon-abi/vm/embedded/definition'
+
 & 'C:\Program Files\nodejs\npm.cmd' test
+& 'C:\Program Files\nodejs\node.exe' --test utils/validation-gates-test.js
 & 'C:\Program Files\nodejs\npm.cmd' run test:security
 & 'C:\Program Files\nodejs\npm.cmd' run build
 ~~~
 
 The generated production extension is in the build directory. The browser
 loads the generated files, not the source directory.
+
+The ABI comparator requires go-zenon's source definitions and fails when they
+are missing or contain no ABI functions. It needs no Go compiler or running
+Zenon node. CI checks out the revision above with a sparse checkout; local tests use
+GO_ZENON_ABI_DIR, or the legacy ../go-zenon/vm/embedded/definition location when
+the variable is unset. Changing this pinned reference requires reviewing the
+decoder against the new protocol definitions.
 
 ## 3. Load in Chrome or Brave
 
@@ -49,6 +63,11 @@ the lockfile with npm ci --legacy-peer-deps, runs the audit, lint and
 regression checks, and creates a Chrome/Brave-ready ZIP with a SHA-256
 checksum. The workflow artifact is the ZIP itself, without a second artifact
 archive; the checksum is attached to the GitHub Release.
+
+Download the ZIP and its .sha256 file into the same directory. On systems with
+GNU coreutils, run `sha256sum --check syrius-extension-0.3.3-chrome-brave.zip.sha256`
+there. The checksum records the ZIP's basename, so it does not depend on a CI
+workspace directory.
 
 The current extension version is 0.3.3. A push to `main` automatically creates
 the matching `v0.3.3` tag and publishes the ZIP assets to a GitHub Release.
