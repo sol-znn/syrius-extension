@@ -81,12 +81,12 @@ const signMessage = async (message, { addressIndex } = {}) => {
   const [signature, publicKey, address] = await Promise.all([
     keyPair.sign(encodeMessage(message)),
     keyPair.getPublicKey(),
-    vault.getAddress(addressIndex),
+    keyPair.getAddress(),
   ]);
 
   return {
     message,
-    address,
+    address: address.toString(),
     publicKey: bytesToHex(publicKey),
     signature: bytesToHex(signature),
   };

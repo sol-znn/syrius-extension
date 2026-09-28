@@ -2,54 +2,27 @@ import { Zenon } from 'znn-ts-sdk';
 import { sendInternalQuietly } from '../utils/messaging';
 import { getCurrentNodeUrl } from '../utils/storage';
 import session from './session';
+import vault from './vault';
 
-// Telling the rest of the world what the wallet is pointed at.
-//
-// Two audiences, and the old code only served one of them badly. Connected
-// sites need an event when the address, chain or node changes — that used to be
-// a `chrome.runtime.sendMessage({message: "znn.addressChanged"})` scattered
-// through four screens. And the service worker needs the current values so it
-// can answer a page's read-only call without waking the popup; that did not
-// exist at all, which is why every single site call opened a window.
-//
-// Both are updated together here, because a site being told an address changed
-// while the worker still reports the old one is worse than neither.
-
-const publicState = async (address) => ({
-  address: address || null,
-  chainId: Zenon.getChainIdentifier(),
-  nodeUrl: getCurrentNodeUrl(),
-});
-
-// Publishing is awaited because the service worker answers a site's read-only
-// call out of it. Telling the open pages is not: it is a courtesy to whatever
-// tabs happen to be open, and the person unlocking their wallet should never
-// wait on it.
-const announceUnlock = async (address) => {
-  await session.publish(await publicState(address));
-  sendInternalQuietly('events.accountsChanged', { address });
+// Derive public values from the captured live vault, never from an address
+// argument retained by a screen before an asynchronous connection/unlock.
+const announce = async (event, expectedLifetime) => {
+  if (!vault.isUnlocked()) return false;
+  try {
+    const lifetime = expectedLifetime || vault.capture();
+    const address = await vault.getAddress(vault.getSelectedIndex(), lifetime);
+    await vault.assertSession(lifetime);
+    await session.publish(lifetime.id, {
+      address, chainId: Zenon.getChainIdentifier(), nodeUrl: getCurrentNodeUrl(),
+    });
+    await sendInternalQuietly(event, { leaseId: lifetime.id });
+    return true;
+  } catch (error) { return false; }
 };
-
-const announceAddress = async (address) => {
-  await session.publish(await publicState(address));
-  await sendInternalQuietly('events.accountsChanged', { address });
-};
-
-const announceChain = async (chainId, address) => {
-  await session.publish(await publicState(address));
-  await sendInternalQuietly('events.chainChanged', { chainId });
-};
-
-const announceNode = async (nodeUrl, address) => {
-  await session.publish(await publicState(address));
-  await sendInternalQuietly('events.nodeChanged', { nodeUrl });
-};
-
-// Locking has to reach the pages, or a site keeps showing an address for a
-// wallet that is shut.
-const announceLock = async () => {
-  await session.unpublish();
-  await sendInternalQuietly('session.locked', {});
-};
+const announceUnlock = (address, lifetime) => announce('events.accountsChanged', lifetime);
+const announceAddress = () => announce('events.accountsChanged');
+const announceChain = () => announce('events.chainChanged');
+const announceNode = () => announce('events.nodeChanged');
+const announceLock = (leaseId) => sendInternalQuietly('session.locked', { leaseId });
 
 export { announceUnlock, announceAddress, announceChain, announceNode, announceLock };

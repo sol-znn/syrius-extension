@@ -46,7 +46,7 @@ const notify = {
   error: (error, options = {}) => {
     const message = readableError(error);
 
-    if (isExpectedLockError(message)) {
+    if (error?.code === 'WALLET_LOCKED' || isExpectedLockError(message)) {
       return null;
     }
     return toast(message, { ...base, type: 'error', autoClose: 5000, ...options });

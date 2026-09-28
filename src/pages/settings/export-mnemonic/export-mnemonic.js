@@ -33,7 +33,7 @@ const ExportMnemonic = () => {
         setError('inputPasswordField', { message: 'Wrong password' });
         return;
       }
-      const mnemonic = vault.getMnemonic();
+      const mnemonic = await vault.getMnemonic();
 
       if (!mnemonic) {
         notify.error('This wallet has no recovery phrase stored.');

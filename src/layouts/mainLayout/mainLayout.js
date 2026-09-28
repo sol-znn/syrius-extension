@@ -11,6 +11,11 @@ import Splash from '../../components/splash/splash';
 
 import { completeUnlock } from '../../services/wallet/bootstrap';
 import session from '../../services/wallet/session';
+import vault from '../../services/wallet/vault';
+import { resetWalletState } from '../../services/redux/walletSlice';
+import { resetPendingTransactions } from '../../services/redux/pendingTransactionsSlice';
+import { invalidateAccountCache } from '../../services/hooks/useAccount';
+import { notify } from '../../services/utils/notify';
 import { loadStorageWalletNames } from '../../services/utils/utils';
 import { getCurrentNodeUrl } from '../../services/utils/storage';
 import { isDevWalletBuild, prepareDevWallet } from '../../services/utils/devWallet';
@@ -26,9 +31,32 @@ const MainLayout = () => {
   const location = useLocation();
   const dispatch = useDispatch();
   const [isBooting, setIsBooting] = useState(true);
+  const [bootError, setBootError] = useState(null);
+  const [bootAttempt, setBootAttempt] = useState(0);
+  const pendingRevocation = useRef(null);
 
   // Captured once, before any redirect of ours can overwrite it.
   const requestedRoute = useRef(location.pathname);
+
+  // Local expiry and another extension window's lock also clear visible secrets
+  // and copied UI state. This cleanup must never clear a newer shared lease.
+  useEffect(() => vault.onLock(({ leaseId, error } = {}) => {
+    invalidateAccountCache();
+    dispatch(resetPendingTransactions());
+    dispatch(resetWalletState());
+    notify.dismissAll();
+    if (error?.code === 'WALLET_SESSION_UNAVAILABLE') {
+      // Local secrets have been purged, but shared revocation is unconfirmed.
+      // Retain its identity for the same conditional recovery used at startup.
+      pendingRevocation.current = leaseId;
+      setBootError(error.message);
+      setIsBooting(false);
+      return;
+    }
+    navigate('/password', { replace: true, state: {
+      returnTo: requestedRoute.current === '/site-integration' ? '/site-integration' : null,
+    } });
+  }), [dispatch, navigate]);
 
   // A way in for the dev harness that does not mean clicking through the whole
   // wallet to reach the screen being worked on. `utils/dev-harness.js` also
@@ -52,7 +80,23 @@ const MainLayout = () => {
   useEffect(() => {
     let cancelled = false;
 
+    const revokeFailedRestore = async () => {
+      const id = pendingRevocation.current;
+      if (!id) return;
+      await session.clear(id);
+      vault.lock(id);
+      if (!cancelled && pendingRevocation.current === id) {
+        pendingRevocation.current = null;
+        setIsBooting(true);
+        setBootError(null);
+      }
+    };
+
     const boot = async () => {
+      // Retry the failed identity before attempting another restore. A newer
+      // shared lease is preserved by the conditional clear.
+      await revokeFailedRestore();
+      if (cancelled) return;
       // Creates the harness' wallet and points it at a node, before anything
       // asks whether this profile has a wallet at all. Compiled out of every
       // build that is not driven by the dev harness.
@@ -92,12 +136,13 @@ const MainLayout = () => {
       // again: the entropy is already there, so this is a few milliseconds
       // rather than a key derivation function chosen to be slow.
       const unlock = await session.load();
+      if (cancelled) return;
 
       if (unlock && wallets.includes(unlock.walletName)) {
         try {
           await completeUnlock({
             walletName: unlock.walletName,
-            entropy: unlock.entropy,
+            sessionRecord: unlock,
             dispatch,
           });
           if (!cancelled) {
@@ -108,16 +153,25 @@ const MainLayout = () => {
           }
           return;
         } catch (err) {
-          // A session that cannot be turned back into a wallet is a session
-          // worth forgetting rather than one worth reporting.
-          await session.clear();
+          // Retry owns the new startup. A late node/restore completion must
+          // not replace its recovery identity or screen state.
+          if (cancelled) return;
+          // Do not show a successful locked state if shared cleanup fails.
+          // The startup error view keeps this identity for an explicit retry.
+          pendingRevocation.current = unlock.id;
+          await revokeFailedRestore();
         }
       }
 
       navigateIfNeeded('/password', { state: { returnTo: deepLink } });
     };
 
-    boot().finally(() => {
+    boot().catch((error) => {
+      if (!cancelled) {
+        setBootError(error?.code === 'WALLET_LOCK_FAILED' ? error.message :
+          'Could not read or restore the wallet session. Other wallet windows may still be unlocked. Try again or close the browser.');
+      }
+    }).finally(() => {
       if (!cancelled) {
         setIsBooting(false);
       }
@@ -127,10 +181,24 @@ const MainLayout = () => {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [bootAttempt]);
 
   if (isBooting) {
     return <Splash />;
+  }
+
+  if (bootError) {
+    return (
+      <div className="page" role="alert">
+        <h2>Wallet session needs attention</h2>
+        <p>{bootError}</p>
+        <button type="button" className="button primary" onClick={() => {
+          setIsBooting(true);
+          setBootError(null);
+          setBootAttempt((attempt) => attempt + 1);
+        }}>Retry</button>
+      </div>
+    );
   }
 
   return (

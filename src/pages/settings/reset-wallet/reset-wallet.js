@@ -46,12 +46,14 @@ const ResetWallet = () => {
         return;
       }
 
+      // Keep the saved wallet intact if global revocation fails, so removal
+      // remains retryable and other windows are not left with live authority.
+      await lockWallet();
       if (!removeStorageWallet(walletName)) {
         notify.error('Could not remove that wallet.');
         return;
       }
 
-      await lockWallet();
       invalidateAccountCache();
       dispatch(resetWalletState());
       dispatch(resetPendingTransactions());

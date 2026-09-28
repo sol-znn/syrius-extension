@@ -1,13 +1,10 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useSelector } from 'react-redux';
 import { useForm } from 'react-hook-form';
-import { KeyStore } from 'znn-ts-sdk';
 
 import { notify } from '../../../services/utils/notify';
 import { validateWalletPassword, saveWalletWithPassword } from '../../../services/wallet/password';
 import vault from '../../../services/wallet/vault';
-import session from '../../../services/wallet/session';
 
 // Changing the wallet password.
 //
@@ -22,7 +19,6 @@ import session from '../../../services/wallet/session';
 
 const ChangePassword = () => {
   const navigate = useNavigate();
-  const walletName = useSelector((state) => state.wallet.walletName);
 
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
@@ -41,22 +37,14 @@ const ChangePassword = () => {
     setIsSaving(true);
 
     try {
-      // Verifying rather than trusting the open keystore: this is exactly the
-      // moment to make somebody prove they are the owner.
-      if (!(await vault.verifyPassword(currentPassword))) {
+      const lifetime = vault.capture();
+      if (!(await vault.changePassword(currentPassword, newPassword))) {
         setError('currentPasswordField', { message: 'Wrong password' });
         return;
       }
-
-      await saveWalletWithPassword(
-        new KeyStore().fromEntropy(vault.getEntropy()),
-        newPassword,
-        walletName
-      );
-
-      // The session holds entropy, not the password, so it survives this
-      // unchanged — but its deadline is worth pushing out after the work.
-      await session.touch();
+      // A completed change may be followed immediately by a lock. Leave the
+      // locked screen in place instead of navigating from an unmounted form.
+      if (!vault.isCurrent(lifetime)) return;
 
       notify.success('Password changed');
       navigate('/tabs/settings', { replace: true });

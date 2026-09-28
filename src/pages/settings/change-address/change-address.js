@@ -7,7 +7,6 @@ import { getLabels, setLabel, setAddressInfo } from '../../../services/utils/sto
 import { notify } from '../../../services/utils/notify';
 import { announceAddress } from '../../../services/wallet/announce';
 import { invalidateAccountCache } from '../../../services/hooks/useAccount';
-import session from '../../../services/wallet/session';
 import vault from '../../../services/wallet/vault';
 
 // Choosing which derived address the wallet is using.
@@ -55,7 +54,7 @@ const ChangeAddress = () => {
 
     // The cached balances belong to the address being left behind.
     invalidateAccountCache();
-    await session.touch({ selectedAddressIndex: index });
+    await vault.touch({ selectedAddressIndex: index });
     await announceAddress(address);
 
     // Switching addresses repeatedly while this toast is still up reuses it

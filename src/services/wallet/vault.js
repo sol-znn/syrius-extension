@@ -1,180 +1,235 @@
-import { KeyStore, KeyStoreManager, Primitives } from 'znn-ts-sdk';
+import { KeyFile, KeyStore, KeyStoreManager, Primitives } from 'znn-ts-sdk';
+import session from './session';
 
-// The unlocked wallet, held once.
-//
-// Every screen used to open the keystore for itself: `readKeyStore(password,
-// name)` on mount in the dashboard, in send, in receive, in plasma, in
-// delegate, in stake, in change-address, and twice more per signature in the
-// dApp flow. That call is Argon2id at 64 MiB, which is deliberately expensive —
-// it is the thing standing between a stolen keystore and the coins in it. Doing
-// it on every navigation cost about a second of frozen popup each time and
-// meant the wallet password had to be kept in Redux, in plain text, so that any
-// screen could redo it.
-//
-// It happens once here, at unlock. Screens ask this module for a key pair.
-
+// Raw keystores/keys never leave this module. Every exported key handle is a
+// revocable facade, including the public derivation handle used by previews.
 const state = {
-  walletName: null,
-  keyStore: null,
-  // Which of the wallet's derived addresses is in use.
-  //
-  // This is the default for every accessor below, and it exists because the
-  // alternative — defaulting to index 0 and asking each caller to pass the
-  // selected one — was tried and did not hold: six call sites across the
-  // dashboard, plasma, delegate, stake and the dApp approval screen asked for a
-  // key pair without an index, and every one of them silently got address 0.
-  // The visible effect was a wallet that showed the balance of the address you
-  // had chosen and signed with a different one.
-  selectedIndex: 0,
-  // Deriving a key pair is Ed25519 over a BIP-44 path — cheap next to Argon2id
-  // but not free, and the address for one is an async hash. Both are memoised
-  // per index because a screen that renders a list of addresses asks for the
-  // same ones repeatedly.
-  keyPairs: new Map(),
-  addresses: new Map(),
+  generation: 0, walletName: null, keyStore: null, lease: null, selectedIndex: 0,
+  rawKeys: new Map(), rawSigningKeys: new Map(), publicKeys: new Map(), signingKeys: new Map(), addresses: new Map(),
 };
-
-const isUnlocked = () => state.keyStore !== null;
-
-const getWalletName = () => state.walletName;
-
-// The seed material, for handing to the session store so that reopening the
-// popup does not mean running the key derivation again. Never leaves the
-// extension's own trusted contexts.
-const getEntropy = () => (state.keyStore ? state.keyStore.entropy : null);
-
-const getMnemonic = () => (state.keyStore ? state.keyStore.mnemonic : null);
-
-const clear = () => {
-  state.walletName = null;
-  state.keyStore = null;
-  state.selectedIndex = 0;
-  state.keyPairs.clear();
-  state.addresses.clear();
+const listeners = new Set();
+let timer;
+const isCurrent = (scope) => Boolean(scope && state.keyStore &&
+  scope.generation === state.generation && scope.id === state.lease?.id);
+const lock = (expectedId, error) => {
+  if (expectedId !== undefined && state.lease?.id !== expectedId) return;
+  const wasUnlocked = Boolean(state.keyStore);
+  const leaseId = state.lease?.id;
+  state.generation += 1;
+  state.walletName = null; state.keyStore = null; state.lease = null; state.selectedIndex = 0;
+  state.rawKeys.clear(); state.rawSigningKeys.clear(); state.publicKeys.clear(); state.signingKeys.clear(); state.addresses.clear();
+  clearTimeout(timer);
+  if (wasUnlocked) listeners.forEach((listener) => {
+    try { listener({ leaseId, error }); } catch (error) { /* UI cleanup cannot block key revocation. */ }
+  });
 };
-
-const adopt = (walletName, keyStore) => {
-  clear();
-  state.walletName = walletName;
-  state.keyStore = keyStore;
-  return keyStore;
+const onLock = (listener) => { listeners.add(listener); return () => listeners.delete(listener); };
+const isUnlocked = () => Boolean(state.keyStore && state.lease && (
+  state.lease.mode === 'local' || Date.now() < state.lease.expiresAt
+));
+const capture = () => {
+  if (!state.keyStore || !state.lease) throw session.ended();
+  return Object.freeze({ id: state.lease.id, generation: state.generation });
 };
-
-// The slow path, used once when somebody types their password. Throws when the
-// password is wrong — the SDK's own error, which `readableError` turns into
-// "Wrong password."
-const unlockWithPassword = async (walletName, password) => {
-  const manager = new KeyStoreManager();
-  const keyStore = await manager.readKeyStore(password, walletName);
-
-  if (!keyStore) {
-    throw new Error('Error decrypting');
+const assertLocal = (scope) => { if (!isCurrent(scope)) throw session.ended(); };
+const schedule = () => {
+  clearTimeout(timer);
+  if (state.lease?.mode !== 'timed') return;
+  const scope = capture();
+  timer = setTimeout(() => { authorize(scope, () => true).catch(() => {}); },
+    Math.max(0, Math.min(2147483647, state.lease.expiresAt - Date.now())));
+};
+const authorize = async (scope, operation) => {
+  assertLocal(scope);
+  try {
+    const result = await session.use(scope.id, async (record) => {
+      assertLocal(scope);
+      state.lease = record;
+      schedule();
+      const result = await operation();
+      assertLocal(scope);
+      return result;
+    });
+    assertLocal(scope);
+    if (!isUnlocked()) throw session.ended();
+    return result;
+  } catch (error) {
+    if (['WALLET_LOCKED', 'WALLET_SESSION_UNAVAILABLE'].includes(error.code) && isCurrent(scope)) {
+      lock(scope.id, error);
+    }
+    throw error;
   }
-  return adopt(walletName, keyStore);
 };
-
-// The fast path, used when the popup reopens inside an unexpired session. No
-// key derivation function runs at all.
-const unlockWithEntropy = (walletName, entropy) => {
-  if (!entropy) {
-    throw new Error('No session key material');
-  }
-  return adopt(walletName, new KeyStore().fromEntropy(entropy));
+const assertSession = (scope = capture()) => authorize(scope, () => true);
+const adopt = (walletName, keyStore, record, selectedIndex) => {
+  // Replacement invalidates old handles/caches without emitting a lock UI
+  // event in the middle of a successful password/restore workflow.
+  state.generation += 1;
+  state.rawKeys.clear(); state.rawSigningKeys.clear(); state.publicKeys.clear(); state.signingKeys.clear(); state.addresses.clear();
+  state.walletName = walletName; state.keyStore = keyStore; state.lease = record;
+  state.selectedIndex = Number.isInteger(selectedIndex) && selectedIndex >= 0 ? selectedIndex : 0;
+  schedule();
+  return capture();
 };
-
-const requireKeyStore = () => {
-  if (!state.keyStore) {
-    throw new Error('The wallet is locked');
-  }
-  return state.keyStore;
+const unlockWithPassword = async (walletName, password, selectedIndex = 0) => {
+  const generation = state.generation;
+  const expectedId = await session.begin();
+  if (generation !== state.generation) throw session.ended();
+  const keyStore = await new KeyStoreManager().readKeyStore(password, walletName);
+  if (!keyStore) throw new Error('Error decrypting');
+  if (generation !== state.generation) throw session.ended();
+  return session.create(expectedId, { walletName, entropy: keyStore.entropy, selectedAddressIndex: selectedIndex }, (record) => {
+    if (generation !== state.generation) throw session.ended();
+    return adopt(walletName, keyStore, record, selectedIndex);
+  });
 };
-
+const restore = async (record, selectedIndex = 0) => {
+  const generation = state.generation;
+  return session.restore(record, selectedIndex, (current, entropy) => {
+    if (generation !== state.generation) throw session.ended();
+    return adopt(current.walletName, new KeyStore().fromEntropy(entropy), current, selectedIndex);
+  });
+};
 const getSelectedIndex = () => state.selectedIndex;
-
 const setSelectedIndex = (index) => {
+  capture();
   state.selectedIndex = Number.isInteger(index) && index >= 0 ? index : 0;
 };
-
-const getKeyPair = (index = state.selectedIndex) => {
-  const keyStore = requireKeyStore();
-
-  if (!state.keyPairs.has(index)) {
-    state.keyPairs.set(index, keyStore.getKeyPair(index));
-  }
-  return state.keyPairs.get(index);
+const getWalletName = () => state.walletName;
+const rawKey = (scope, index) => {
+  assertLocal(scope);
+  if (!state.rawKeys.has(index)) state.rawKeys.set(index, state.keyStore.getKeyPair(index));
+  return state.rawKeys.get(index);
 };
-
-const getAddress = async (index = state.selectedIndex) => {
-  if (!state.addresses.has(index)) {
-    const address = (await getKeyPair(index).getAddress()).toString();
-    state.addresses.set(index, address);
+const publicHandle = (scope, index) => {
+  assertLocal(scope);
+  if (!state.publicKeys.has(index)) {
+    state.publicKeys.set(index, Object.freeze({
+      getAddress: () => authorize(scope, async () => {
+        if (!state.addresses.has(index)) {
+          const address = (await rawKey(scope, index).getAddress()).toString();
+          assertLocal(scope);
+          state.addresses.set(index, address);
+        }
+        return Primitives.Address.parse(state.addresses.get(index));
+      }),
+      getPublicKey: () => authorize(scope, async () => {
+        const publicKey = await rawKey(scope, index).getPublicKey();
+        // Preserve the SDK Buffer type: its transaction JSON calls
+        // toString('base64'). Copy through that type without an app polyfill.
+        return publicKey.constructor.from(publicKey);
+      }),
+    }));
   }
-  return state.addresses.get(index);
+  return state.publicKeys.get(index);
 };
-
-// `Primitives.Address` is what every SDK call actually wants; the string form
-// is only for display and the clipboard.
-const getAddressObject = async (index = state.selectedIndex) =>
-  Primitives.Address.parse(await getAddress(index));
-
-// Deriving n addresses for the address picker. Sequential because each one is
-// an async hash over the previous derivation's output in the SDK.
+const getKeyPair = (index = state.selectedIndex) => publicHandle(capture(), index);
+const getSigningKeyPair = async (index = state.selectedIndex) => {
+  const scope = capture();
+  return authorize(scope, async () => {
+    if (!state.signingKeys.has(index)) {
+      const raw = await rawKey(scope, index).generateKeyPair();
+      assertLocal(scope);
+      state.rawSigningKeys.set(index, raw);
+      const handle = publicHandle(scope, index);
+      state.signingKeys.set(index, Object.freeze({
+        ...handle,
+        sign: (bytes) => {
+          const message = new Uint8Array(bytes);
+          return authorize(scope, () => state.rawSigningKeys.get(index).sign(message));
+        },
+      }));
+    }
+    return state.signingKeys.get(index);
+  });
+};
+const getAddress = async (index = state.selectedIndex, scope = capture()) =>
+  (await publicHandle(scope, index).getAddress()).toString();
+const getAddressObject = async (index = state.selectedIndex) => publicHandle(capture(), index).getAddress();
 const getAddresses = async (count) => {
+  const scope = capture();
   const addresses = [];
-  for (let index = 0; index < count; index += 1) {
-    addresses.push(await getAddress(index));
-  }
+  for (let index = 0; index < count; index += 1) addresses.push(await getAddress(index, scope));
+  await assertSession(scope);
   return addresses;
 };
-
-// Signing wants a generated pair rather than the derivation handle. Also
-// memoised: `generateKeyPair` was being called inline on the send path.
-const signingKeyPairs = new Map();
-
-const getSigningKeyPair = async (index = state.selectedIndex) => {
-  if (!signingKeyPairs.has(index)) {
-    signingKeyPairs.set(index, await getKeyPair(index).generateKeyPair());
-  }
-  return signingKeyPairs.get(index);
-};
-
-const lock = () => {
-  signingKeyPairs.clear();
-  clear();
-};
-
-// Confirms a password against the wallet already open, for the screens that
-// have to re-authorise — showing the mnemonic, changing the password, removing
-// a wallet. Deliberately runs the full key derivation: that is the point.
+const getEntropy = async () => authorize(capture(), () => state.keyStore.entropy);
+const getMnemonic = async () => authorize(capture(), () => state.keyStore.mnemonic);
 const verifyPassword = async (password) => {
-  if (!state.walletName) {
-    return false;
-  }
   try {
-    const manager = new KeyStoreManager();
-    const keyStore = await manager.readKeyStore(password, state.walletName);
-    return Boolean(keyStore && keyStore.entropy === state.keyStore?.entropy);
-  } catch (err) {
+    const scope = capture();
+    const walletName = state.walletName;
+    const entropy = await authorize(scope, () => state.keyStore.entropy);
+    const keyStore = await new KeyStoreManager().readKeyStore(password, walletName);
+    await assertSession(scope);
+    return Boolean(keyStore && keyStore.entropy === entropy);
+  } catch (error) {
+    if (error.code === 'WALLET_SESSION_UNAVAILABLE') throw error;
     return false;
   }
 };
+// The SDK manager combines slow encryption and an unconditional disk write.
+// Separate those phases so a completed lock can cancel a pending password change.
+const changePassword = async (currentPassword, newPassword) => {
+  const scope = capture();
+  const verified = await verifyPassword(currentPassword);
+  await assertSession(scope);
+  if (!verified) return false;
+  const walletName = state.walletName;
+  const store = {
+    getKeyPair: (index = 0) => publicHandle(scope, index),
+    get entropy() {
+      assertLocal(scope);
+      if (!isUnlocked()) throw session.ended();
+      return state.keyStore.entropy;
+    },
+  };
+  // Argon2 must not hold the cross-document lock. The only result retained here
+  // is encrypted, and publication to persistent storage requires a fresh lease.
+  const encrypted = await KeyFile.encrypt(store, newPassword);
+  let committed = false;
+  try {
+    return await authorize(scope, () => {
+      const manager = new KeyStoreManager();
+      // Match the pinned SDK manager's storage format and name normalization.
+      const wallets = manager.listAllKeyStores();
+      wallets[walletName.replace(' ', '-')] = encrypted;
+      localStorage.setItem(manager.walletPath, JSON.stringify(wallets));
+      committed = true;
+      return true;
+    });
+  } catch (error) {
+    // A lock ordered after the synchronous write cannot undo it or turn a
+    // successful password change into an apparent failure.
+    if (committed) return true;
+    throw error;
+  }
+};
+const touch = async (patch = {}, scope = capture()) => {
+  assertLocal(scope);
+  try {
+    return await session.touch(scope.id, {
+      walletName: state.walletName, entropy: state.keyStore.entropy,
+      selectedAddressIndex: patch.selectedAddressIndex ?? state.selectedIndex,
+    }, (record) => {
+      assertLocal(scope); state.lease = record; schedule(); return true;
+    });
+  } catch (error) {
+    if (['WALLET_LOCKED', 'WALLET_SESSION_UNAVAILABLE'].includes(error.code) && isCurrent(scope)) {
+      lock(scope.id, error);
+    }
+    throw error;
+  }
+};
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== 'session' || !changes[session.sessionKey] || !state.keyStore) return;
+  const scope = capture();
+  authorize(scope, () => true).catch(() => {});
+});
 
 const vault = {
-  isUnlocked,
-  getWalletName,
-  getSelectedIndex,
-  setSelectedIndex,
-  getEntropy,
-  getMnemonic,
-  unlockWithPassword,
-  unlockWithEntropy,
-  getKeyPair,
-  getSigningKeyPair,
-  getAddress,
-  getAddressObject,
-  getAddresses,
-  verifyPassword,
-  lock,
+  isUnlocked, getWalletName, getSelectedIndex, setSelectedIndex, getEntropy, getMnemonic,
+  unlockWithPassword, restore, getKeyPair, getSigningKeyPair, getAddress, getAddressObject,
+  getAddresses, verifyPassword, changePassword, touch, capture, isCurrent, assertSession, lock, onLock,
 };
-
 export default vault;

@@ -1,6 +1,7 @@
 import frames from './frames';
 import permissions from './permissions';
 import requests from './requests';
+import sessionLease from '../../services/wallet/sessionLease';
 
 // The service worker.
 //
@@ -16,9 +17,6 @@ import requests from './requests';
 // previous version cached the wallet password in a `const` up here, which both
 // evaporated at random and answered `internal.getCredentialsFromBackgroundScript`
 // for any sender at all.
-
-const unlockKey = 'znn.unlock';
-const publicStateKey = 'znn.publicState';
 
 // Kept in step with `services/wallet/signMessage.js`, and duplicated rather
 // than imported: this file is a service worker that deliberately does not link
@@ -67,26 +65,9 @@ const isFromContentScript = (sender) =>
   typeof sender.url === 'string' &&
   !sender.url.startsWith(extensionOrigin);
 
-const readSession = async (key) => {
-  try {
-    const stored = await chrome.storage.session.get(key);
-    return stored[key] || null;
-  } catch (err) {
-    return null;
-  }
-};
-
-// The public view of the unlocked wallet, or null when it is locked or the
-// session has aged out. Expiry is enforced here as well as in the popup so a
-// site cannot read an address out of a session the person believes is closed.
-const getPublicState = async () => {
-  const unlock = await readSession(unlockKey);
-
-  if (!unlock || !unlock.expiresAt || Date.now() > unlock.expiresAt) {
-    return null;
-  }
-  return readSession(publicStateKey);
-};
+// The same lease authority used by live vaults; public data is bound to that
+// identity so a delayed old popup cannot advertise an unlocked replacement.
+const getPublicState = () => sessionLease.getPublicState();
 
 //
 // Talking back to pages
@@ -313,22 +294,29 @@ const internalMethods = {
   //
   // State changes the popup makes that sites care about
   //
-  'events.accountsChanged': async ({ address }) => {
-    await broadcast('accountsChanged', address ? [address] : []);
+  'events.accountsChanged': async ({ leaseId }) => {
+    const state = await sessionLease.getPublicState(leaseId, true);
+    if (!state) return false;
+    await broadcast('accountsChanged', state.address ? [state.address] : []);
     return true;
   },
-  'events.chainChanged': async ({ chainId }) => {
-    await broadcast('chainChanged', chainId);
+  'events.chainChanged': async ({ leaseId }) => {
+    const state = await sessionLease.getPublicState(leaseId, true);
+    if (!state) return false;
+    await broadcast('chainChanged', state.chainId);
     return true;
   },
-  'events.nodeChanged': async ({ nodeUrl }) => {
-    await broadcast('nodeChanged', nodeUrl);
+  'events.nodeChanged': async ({ leaseId }) => {
+    const state = await sessionLease.getPublicState(leaseId, true);
+    if (!state) return false;
+    await broadcast('nodeChanged', state.nodeUrl);
     return true;
   },
 
   // Locking has to reach the pages too, or a site keeps showing an address for
   // a wallet that is shut.
-  'session.locked': async () => {
+  'session.locked': async ({ leaseId }) => {
+    if (!(await sessionLease.isLockedGeneration(leaseId))) return false;
     await broadcast('accountsChanged', []);
     return true;
   },
@@ -437,10 +425,8 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name !== autoLockAlarm) {
     return;
   }
-  const unlock = await readSession(unlockKey);
-
-  if (unlock && (!unlock.expiresAt || Date.now() > unlock.expiresAt)) {
-    await chrome.storage.session.remove([unlockKey, publicStateKey]);
+  const generation = await sessionLease.expire();
+  if (generation && await sessionLease.isLockedGeneration(generation)) {
     await broadcast('accountsChanged', []);
   }
 });
