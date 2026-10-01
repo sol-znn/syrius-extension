@@ -56,7 +56,21 @@ const page = (file, initial) => {
     if (name === 'react-redux') return { useDispatch: () => () => {}, useSelector: () => 'test-wallet' };
     if (name === 'znn-ts-sdk') return sdk;
     if (name.endsWith('/wallet/password')) return policy;
-    if (name.endsWith('/wallet/vault')) return { verifyPassword: async () => correctCurrentPassword, getEntropy: () => store.entropy };
+    // Password change commits through vault.changePassword, which applies the
+    // same policy module at the encrypted-wallet write (asserted against the
+    // real vault in live-vault-test). This stand-in keeps that order: prove
+    // the current password, apply the policy, then write.
+    if (name.endsWith('/wallet/vault')) return {
+      verifyPassword: async () => correctCurrentPassword, getEntropy: () => store.entropy,
+      capture: () => ({}), isCurrent: () => true,
+      changePassword: async (current, next) => {
+        if (!correctCurrentPassword) return false;
+        const validation = policy.validateWalletPassword(next);
+        if (validation !== true) throw new Error(validation);
+        writes.push([{ ...store }, next, 'test-wallet']);
+        return true;
+      },
+    };
     if (name.endsWith('/wallet/session')) return { touch: async () => {} };
     if (name.endsWith('/wallet/bootstrap')) return { completeUnlock: async () => {} };
     if (name.endsWith('/utils/notify')) return { notify: { success: () => {}, error: (err) => errors.push(err) } };

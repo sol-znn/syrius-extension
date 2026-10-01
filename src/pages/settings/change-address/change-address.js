@@ -7,7 +7,6 @@ import { getLabels, setLabel, setAddressInfo } from '../../../services/utils/sto
 import { notify } from '../../../services/utils/notify';
 import { announceAddress } from '../../../services/wallet/announce';
 import { invalidateAccountCache } from '../../../services/hooks/useAccount';
-import session from '../../../services/wallet/session';
 import vault from '../../../services/wallet/vault';
 
 // Choosing which derived address the wallet is using.
@@ -49,23 +48,31 @@ const ChangeAddress = () => {
     if (!address) {
       return;
     }
-    setAddressInfo(walletName, { selectedAddressIndex: index, maxAddressIndex });
-    vault.setSelectedIndex(index);
-    dispatch(storeSelectedAddress({ index, address }));
+    try {
+      // A new selection generation: consent, public state and approvals bound
+      // to the previous account stop applying. The saved selection is written
+      // first, inside the same session transaction; if that fails nothing moves.
+      const changed = await vault.selectAddress(index, maxAddressIndex);
+      dispatch(storeSelectedAddress({ index, address: changed.address }));
 
-    // The cached balances belong to the address being left behind.
-    invalidateAccountCache();
-    await session.touch({ selectedAddressIndex: index });
-    await announceAddress(address);
+      // The cached balances belong to the address being left behind.
+      invalidateAccountCache();
+      await announceAddress();
 
-    // Switching addresses repeatedly while this toast is still up reuses it
-    // rather than stacking one per click, the same as `notify.copied`.
-    notify.success('Address changed', { toastId: 'address-changed' });
+      // Switching addresses repeatedly while this toast is still up reuses it
+      // rather than stacking one per click, the same as `notify.copied`.
+      notify.success('Address changed', { toastId: 'address-changed' });
+    } catch (error) {
+      notify.error(error);
+    }
   };
 
   const addAddress = () => {
     const next = maxAddressIndex + 1;
-    setAddressInfo(walletName, { selectedAddressIndex, maxAddressIndex: next });
+    if (!setAddressInfo(walletName, { selectedAddressIndex, maxAddressIndex: next })) {
+      notify.error('Could not save the new address. Try again.');
+      return;
+    }
     dispatch(storeMaxAddressIndex(next));
   };
 

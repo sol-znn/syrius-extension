@@ -1,55 +1,36 @@
 import { Zenon } from 'znn-ts-sdk';
 import { sendInternalQuietly } from '../utils/messaging';
 import { getCurrentNodeUrl } from '../utils/storage';
+import publicNodeUrl from '../utils/publicNodeUrl';
 import session from './session';
+import vault from './vault';
 
-// Telling the rest of the world what the wallet is pointed at.
-//
-// Two audiences, and the old code only served one of them badly. Connected
-// sites need an event when the address, chain or node changes — that used to be
-// a `chrome.runtime.sendMessage({message: "znn.addressChanged"})` scattered
-// through four screens. And the service worker needs the current values so it
-// can answer a page's read-only call without waking the popup; that did not
-// exist at all, which is why every single site call opened a window.
-//
-// Both are updated together here, because a site being told an address changed
-// while the worker still reports the old one is worse than neither.
-
-const publicState = async (address) => ({
-  address: address || null,
-  chainId: Zenon.getChainIdentifier(),
-  nodeUrl: getCurrentNodeUrl(),
-});
-
-// Publishing is awaited because the service worker answers a site's read-only
-// call out of it. Telling the open pages is not: it is a courtesy to whatever
-// tabs happen to be open, and the person unlocking their wallet should never
-// wait on it.
-const announceUnlock = async (address) => {
-  await session.publish(await publicState(address));
-  sendInternalQuietly('events.accountsChanged', { address });
+// The address published is the shared selection's own, read from the session
+// record, never one a screen retained before an asynchronous connection or
+// unlock. The worker is told which selection generation the event is about and
+// announces only that one; a stale event reveals nothing.
+const announce = async (event, expectedLifetime) => {
+  if (!vault.isUnlocked() || (expectedLifetime && !vault.isCurrent(expectedLifetime))) return false;
+  try {
+    const lifetime = expectedLifetime || vault.capture();
+    await vault.assertSession(lifetime);
+    // Sites learn the node's scheme and host, never credentials or a private
+    // endpoint's path; the wallet keeps the full URL for its own connection.
+    const { selectionId } = await session.publish(lifetime.id, {
+      chainId: Zenon.getChainIdentifier(), nodeUrl: publicNodeUrl(getCurrentNodeUrl()),
+    });
+    await sendInternalQuietly(event, { leaseId: lifetime.id, selectionId });
+    return true;
+  } catch (error) { return false; }
 };
+// Captured before a screen's own slow work (a node connection, say), so the
+// announcement that follows is bound to the session that started it and not
+// to whatever unlocked in the meantime. Null when there is nothing to bind to.
+const captureLifetime = () => (vault.isUnlocked() ? vault.capture() : null);
+const announceUnlock = (address, lifetime) => announce('events.accountsChanged', lifetime);
+const announceAddress = (lifetime) => announce('events.accountsChanged', lifetime);
+const announceChain = (lifetime) => announce('events.chainChanged', lifetime);
+const announceNode = (lifetime) => announce('events.nodeChanged', lifetime);
+const announceLock = (leaseId) => sendInternalQuietly('session.locked', { leaseId });
 
-const announceAddress = async (address) => {
-  await session.publish(await publicState(address));
-  await sendInternalQuietly('events.accountsChanged', { address });
-};
-
-const announceChain = async (chainId, address) => {
-  await session.publish(await publicState(address));
-  await sendInternalQuietly('events.chainChanged', { chainId });
-};
-
-const announceNode = async (nodeUrl, address) => {
-  await session.publish(await publicState(address));
-  await sendInternalQuietly('events.nodeChanged', { nodeUrl });
-};
-
-// Locking has to reach the pages, or a site keeps showing an address for a
-// wallet that is shut.
-const announceLock = async () => {
-  await session.unpublish();
-  await sendInternalQuietly('session.locked', {});
-};
-
-export { announceUnlock, announceAddress, announceChain, announceNode, announceLock };
+export { captureLifetime, announceUnlock, announceAddress, announceChain, announceNode, announceLock };

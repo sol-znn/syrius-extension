@@ -21,7 +21,8 @@ import { embeddedContractName } from '../../../services/utils/contracts';
 import { contractDisplayName } from '../../../services/utils/contractCalls';
 import { formatAmount, formatExact, formatUsd } from '../../../services/utils/format';
 import { notify } from '../../../services/utils/notify';
-import { getSettings, setSetting } from '../../../services/utils/storage';
+import { updateSetting } from '../../../services/wallet/preferences';
+import { getSettings } from '../../../services/utils/storage';
 import { mainnetChainId } from '../../../services/utils/chainId';
 import {
   pendingStatus,
@@ -242,10 +243,11 @@ const Dashboard = () => {
     return () => clearInterval(timer);
   }, [hasPending, refreshNewestTransactions, refresh]);
 
-  const toggleHidden = () => {
-    const next = !hideBalances;
-    setHideBalances(next);
-    setSetting('hideBalances', next);
+  const toggleHidden = async () => {
+    try {
+      const settings = await updateSetting('hideBalances', !hideBalances);
+      setHideBalances(settings.hideBalances);
+    } catch (error) { notify.error(error); }
   };
 
   const znn = balanceMap[znnZts];

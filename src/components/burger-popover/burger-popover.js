@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useDispatch } from 'react-redux';
 
 import lockWallet from '../../services/wallet/lock';
+import { notify } from '../../services/utils/notify';
 import { resetWalletState } from '../../services/redux/walletSlice';
 import { resetPendingTransactions } from '../../services/redux/pendingTransactionsSlice';
 import { invalidateAccountCache } from '../../services/hooks/useAccount';
@@ -33,11 +34,13 @@ const BurgerPopover = ({ onNavigate = () => {} }) => {
 
   const lock = async () => {
     onNavigate();
-    await lockWallet();
-    invalidateAccountCache();
-    dispatch(resetWalletState());
-    dispatch(resetPendingTransactions());
-    navigate('/password', { replace: true });
+    try {
+      await lockWallet();
+      invalidateAccountCache();
+      dispatch(resetWalletState());
+      dispatch(resetPendingTransactions());
+      navigate('/password', { replace: true });
+    } catch (error) { notify.error(error); }
   };
 
   return (
@@ -96,11 +99,13 @@ const BurgerPopover = ({ onNavigate = () => {} }) => {
           // version only cleared the background's password cache and navigated,
           // which left the decrypted keys of the previous wallet in memory.
           onNavigate();
-          await lockWallet();
-          invalidateAccountCache();
-          dispatch(resetWalletState());
-          dispatch(resetPendingTransactions());
-          navigate('/auth/onboarding');
+          try {
+            await lockWallet();
+            invalidateAccountCache();
+            dispatch(resetWalletState());
+            dispatch(resetPendingTransactions());
+            navigate('/auth/onboarding');
+          } catch (error) { notify.error(error); }
         }}
         icon={
           <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true">

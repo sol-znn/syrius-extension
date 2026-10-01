@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 
 import { sendInternal } from '../../../services/utils/messaging';
+import selection from '../../../services/wallet/selection';
 import { notify } from '../../../services/utils/notify';
 
 // Which sites can see this wallet.
@@ -22,11 +23,16 @@ const hostOf = (origin) => {
 const ConnectedSites = () => {
   const [sites, setSites] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
 
+  // An unreadable list is shown as such, with a retry — never as "no sites",
+  // which would read as nothing left to withdraw.
   const load = useCallback(async () => {
     try {
       setSites((await sendInternal('permissions.list')) || []);
+      setLoadError(false);
     } catch (err) {
+      setLoadError(true);
       notify.error(err);
     } finally {
       setIsLoading(false);
@@ -37,23 +43,26 @@ const ConnectedSites = () => {
     load();
   }, [load]);
 
-  const revoke = async (origin) => {
+  const revoke = async ({ origin, scope }) => {
     try {
-      await sendInternal('permissions.revoke', { origin });
-      setSites((current) => current.filter((site) => site.origin !== origin));
+      if (!(await sendInternal('permissions.revoke', { origin, scope }))) throw new Error('Could not disconnect this account. Try again.');
+      setSites((current) => current.filter((site) => site.origin !== origin || !selection.sameScope(site.scope, scope)));
       notify.success(`Disconnected ${hostOf(origin)}`);
     } catch (err) {
       notify.error(err);
+      // A disconnect that did not complete stays listed, marked, for a retry.
+      await load();
     }
   };
 
   const revokeAll = async () => {
     try {
-      await sendInternal('permissions.revokeAll');
+      if (!(await sendInternal('permissions.revokeAll'))) throw new Error('Could not disconnect all accounts. Try again.');
       setSites([]);
       notify.success('Disconnected every site');
     } catch (err) {
       notify.error(err);
+      await load();
     }
   };
 
@@ -67,14 +76,20 @@ const ConnectedSites = () => {
 
   return (
     <div className="page">
-      {!sites.length && (
+      {loadError && (
+        <p className="empty-note" role="alert">
+          Unable to load connected sites.
+          <button type="button" className="thin-button secondary" onClick={load}>Retry</button>
+        </p>
+      )}
+      {!loadError && !sites.length && (
         <p className="empty-note">
           No sites are connected. A site can read your address only after you approve it.
         </p>
       )}
 
       {sites.map((site) => (
-        <div key={site.origin} className="site-row">
+        <div key={JSON.stringify([site.origin, selection.scopeKey(site.scope)])} className="site-row">
           {site.favicon ? (
             <img className="site-favicon" alt="" src={site.favicon} width="20" height="20" />
           ) : (
@@ -84,21 +99,24 @@ const ConnectedSites = () => {
           <div className="site-row-text">
             <div className="site-host">{hostOf(site.origin)}</div>
             <div className="site-origin">{site.origin}</div>
+            <div>{site.scope.walletName} · Account {site.scope.index + 1}</div>
+            <div className="word-break-all">{site.scope.address}</div>
+            {site.revocationPending && <div className="site-origin" role="status">Access blocked. Retry disconnect.</div>}
           </div>
 
           <button
             type="button"
             className="thin-button secondary"
-            onClick={() => revoke(site.origin)}
+            onClick={() => revoke(site)}
           >
-            Disconnect
+            {site.revocationPending ? 'Retry disconnect' : 'Disconnect'}
           </button>
         </div>
       ))}
 
       {sites.length > 1 && (
         <button type="button" className="button danger-text w-100 mt-3" onClick={revokeAll}>
-          Disconnect all
+          Disconnect all wallets and accounts
         </button>
       )}
     </div>

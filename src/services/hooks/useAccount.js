@@ -52,9 +52,11 @@ const useAccount = ({ balances: wantBalances = true, refreshMs = 0 } = {}) => {
         setState((previous) => ({ ...previous, isLoading: true, error: null }));
       }
       try {
+        const lifetime = vault.capture();
         const addressObject = await vault.getAddressObject(selectedAddressIndex);
         const result = await fetchBalances(Zenon.getSingleton(), addressObject);
 
+        if (!vault.isCurrent(lifetime)) return null;
         cache.key = cacheKey;
         cache.balances = result.balances;
         cache.balanceMap = result.balanceMap;

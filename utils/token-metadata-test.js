@@ -9,6 +9,7 @@ const { renderToStaticMarkup } = require('react-dom/server');
 global.window = { crypto: require('node:crypto').webcrypto };
 const memory = new Map();
 global.localStorage = { getItem: key => memory.get(key) ?? null, setItem: (key, value) => memory.set(key, String(value)) };
+global.chrome = { windows: { getCurrent: async () => ({ id: 1 }) } };
 const sdk = require('znn-ts-sdk');
 const { ethers } = require('ethers');
 const root = path.join(__dirname, '..');
@@ -16,6 +17,7 @@ const loader = (override = () => undefined) => {
   const cache = new Map();
   const load = (file) => {
     const filename = path.resolve(root, file);
+    if (filename.endsWith('.json')) return require(filename); // e.g. contract-call schemas
     if (cache.has(filename)) return cache.get(filename);
     const mod = { exports: {} };
     cache.set(filename, mod.exports);
@@ -28,7 +30,7 @@ const loader = (override = () => undefined) => {
       if (replacement !== undefined) return replacement;
       if (name.startsWith('.')) {
         const target = path.resolve(path.dirname(filename), name);
-        return load(target.endsWith('.js') ? target : `${target}.js`);
+        return load(path.extname(target) ? target : `${target}.js`);
       }
       return require(name);
     };
@@ -58,10 +60,12 @@ const view = ({ file, states, account }) => {
   const sent = [];
   const errors = [];
   const rules = {};
+  const effects = [];
   const mockReact = { ...React,
     useState: initial => { const i = cursor++; if (!(i in states)) states[i] = initial; return [states[i], value => { states[i] = value; }]; },
     useRef: initial => { const i = refCursor++; return refs[i] ??= { current: initial }; },
-    useMemo: fn => fn(), useEffect: () => {}, useCallback: fn => fn,
+    // Recorded, not run: a test runs the one it means (see prepare below).
+    useMemo: fn => fn(), useEffect: (fn, deps) => { effects.push({ fn, deps }); }, useCallback: fn => fn,
     useContext: () => ({ openModal: value => { modal = value; } }),
   };
   const Component = loader(name => {
@@ -71,17 +75,44 @@ const view = ({ file, states, account }) => {
     if (name === 'react-hook-form') return { useForm: () => ({ register: (name, options) => { rules[name] = options; return { name }; }, handleSubmit: fn => fn, formState: { errors: {} }, reset: () => {}, setValue: () => {}, trigger: () => {} }) };
     if (name.endsWith('/hooks/useAccount')) return () => account;
     if (name.endsWith('/hooks/useBackgroundSender')) return () => ({ sendInBackground: template => sent.push(template) });
-    if (name.endsWith('/hooks/useBlockSender')) return () => ({ send: async template => { sent.push(template); return template; }, isSending: false, isGeneratingPlasma: false });
+    // A prepared block approval (#4) is signed as prepared: record that block.
+    if (name.endsWith('/hooks/useBlockSender')) return () => ({ send: async (template, options = {}) => {
+      const signed = template ?? options.prepared.block; sent.push(signed); return signed; }, isSending: false, isGeneratingPlasma: false });
     if (name.endsWith('/hooks/modal/modalContext')) return { ModalContext: {} };
-    if (name.endsWith('/wallet/vault')) return {};
+    // Requests reach the approval screen bound to a wallet account (#11); the
+    // stand-in vault is on that same selection.
+    if (name === './vault' || name.endsWith('/wallet/vault')) return { getBinding: () => fixtureBinding, getKeyPair: () => fixtureKey,
+      whileBound: async (_, operation) => operation(), isUnlocked: () => true, getWalletName: () => 'fixture' };
     if (name.endsWith('/wallet/signMessage')) return {};
-    if (name.endsWith('/utils/messaging')) return { sendInternal: async type => type === 'approvals.next' ? { id: 'next', type: 'connect', params: {} } : null };
+    // The approval screen claims a request before signing (single-use request
+    // identities); the stand-in worker grants the claim and accepts the result.
+    if (name.endsWith('/utils/messaging')) return { sendInternal: async (type, params) => {
+      // A well-formed next request: an invalid one is now a reported error (#11).
+      if (type === 'approvals.next') return { version: 4, id: 'next', type: 'connect', params: {}, origin: 'https://example.invalid',
+        tabId: 1, frameId: 0, documentId: 'doc', responseId: 1, title: '', favicon: '', createdAt: Date.now(),
+        expiresAt: Date.now() + 600000, admitted: null, waitForUnlock: false, binding: fixtureBinding,
+        ...require('./fixtures/document-binding-stub').documentFields() };
+      if (type === 'approvals.claim') return { ...params.identity, claimId: 'fixture-claim' };
+      if (type === 'approvals.checkClaim' || type === 'approvals.resolve') return true;
+      return null;
+    } };
     if (name.endsWith('/utils/notify')) return { notify: { error: err => errors.push(err), success: () => {} } };
     if (name.includes('/components/modals/') || name.includes('/components/custom-dropdown/')) return () => null;
     return undefined;
   })(file).default;
-  return { render: () => { cursor = 0; refCursor = 0; return Component(); }, sent, errors, rules, modal: () => modal };
+  // Runs the approval screen's block preparation for the rendered request.
+  const prepare = async () => {
+    const effect = effects.filter(item => item.deps?.length === 4 && item.deps[0] === states[0]).at(-1);
+    effect.fn(); for (let i = 0; i < 40; i++) await new Promise(resolve => setImmediate(resolve));
+  };
+  return { render: () => { cursor = 0; refCursor = 0; effects.length = 0; return Component(); }, prepare, sent, errors, rules, modal: () => modal };
 };
+// The bound account's key, and a node whose account has no blocks yet.
+const fixtureKey = { getAddress: async () => sdk.Primitives.Address.parse('z1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqsggv2f'), getPublicKey: async () => Buffer.alloc(32, 7) };
+sdk.Zenon.getSingleton().ledger.getFrontierBlock = async () => null;
+sdk.Zenon.getSingleton().ledger.getFrontierMomentum = async () => ({ height: 1, hash: sdk.Primitives.Hash.parse('00'.repeat(32)) });
+const fixtureBinding = Object.freeze({ id: 'fixture-selection', ownerId: 'owner', scope: Object.freeze({
+  walletName: 'fixture', walletId: 'z1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqsggv2f', address: 'z1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqsggv2f', index: 0 }) });
 const elements = tree => !tree || typeof tree !== 'object' ? [] : Array.isArray(tree) ? tree.flatMap(elements) : [tree, ...elements(tree.props?.children)];
 const sendFile = 'src/pages/send-receive/send/send.js';
 const approvalFile = 'src/layouts/siteIntegrationLayout/siteIntegrationLayout.js';
@@ -161,10 +192,14 @@ const approvalFile = 'src/layouts/siteIntegrationLayout/siteIntegrationLayout.js
     for (const zts of [znnZts, custom]) {
       for (const destination of [recipient, 'z1qxemdeddedxplasmaxxxxxxxxxxxxxxxxsctrp']) {
         const amount = zts === custom ? exact : '100000001';
-        const request = { id: 'fixture', type, origin: 'https://example.invalid', params: { amount, tokenStandard: zts, to: destination, toAddress: destination, data: '' } };
+        // A complete block template, as a site sends one, with the amount and
+        // token under test; `to` serves the plain-transfer request shape.
+        const block = sdk.Primitives.AccountBlockTemplate.send(sdk.Primitives.Address.parse(destination), sdk.Primitives.TokenStandard.parse(zts), ethers.BigNumber.from(1)).toJson();
+        const request = { id: 'fixture', expiresAt: Date.now() + 600000, binding: fixtureBinding, type, origin: 'https://example.invalid', params: { ...block, amount, tokenStandard: zts, to: destination, toAddress: destination } };
         // Deliberately supply hostile metadata directly, bypassing normalization:
         // amount rendering must enforce its own trust boundary too.
         const page = view({ file: approvalFile, states: [request, null, false, false], account: { address: recipient, balanceMap: { [zts]: entry(zts, 30, 'FORGED') } } });
+        if (type === 'signAndSendBlock') { page.render(); await page.prepare(); }
         const html = renderToStaticMarkup(page.render());
         assert(html.includes(zts));
         assert(html.includes(amount));
@@ -179,8 +214,9 @@ const approvalFile = 'src/layouts/siteIntegrationLayout/siteIntegrationLayout.js
     for (const amount of ['0x05f5e100', '0100000000', 100000000, ethers.BigNumber.from(100000000), { type: 'BigNumber', hex: '0x05f5e100' }]) {
       assert.equal(normalizeBaseUnits(amount), '100000000');
       const params = { ...sdk.Primitives.AccountBlockTemplate.send(sdk.Primitives.Address.parse(recipient), sdk.Primitives.TokenStandard.parse(znnZts), ethers.BigNumber.from(1)).toJson(), to: recipient, amount };
-      const request = { id: 'encoded', type, params };
+      const request = { id: 'encoded', expiresAt: Date.now() + 600000, binding: fixtureBinding, type, params };
       const page = view({ file: approvalFile, states: [request, null, false, false], account: { address: recipient, balanceMap: withBaseTokens({ [znnZts]: entry(znnZts, 30) }) } });
+      if (type === 'signAndSendBlock') { page.render(); await page.prepare(); }
       const tree = page.render();
       assert(renderToStaticMarkup(tree).includes('1.0 ZNN'));
       const button = elements(tree).find(el => el.type === 'button' && el.props.children !== 'Reject');
@@ -192,14 +228,18 @@ const approvalFile = 'src/layouts/siteIntegrationLayout/siteIntegrationLayout.js
     }
     for (const amount of ['-1', '-0x01', '1.1', '1e8', '', null, undefined, Number.MAX_SAFE_INTEGER + 1, { toString: 'invalid' }]) {
       assert.throws(() => normalizeBaseUnits(amount));
-      const request = { id: 'invalid', type, params: { to: recipient, tokenStandard: znnZts, amount } };
+      const request = { id: 'invalid', expiresAt: Date.now() + 600000, binding: fixtureBinding, type, params: { to: recipient, tokenStandard: znnZts, amount } };
       const page = view({ file: approvalFile, states: [request, null, false, false], account: { address: recipient, balanceMap: withBaseTokens({ [znnZts]: entry(znnZts, 8) }) } });
+      if (type === 'signAndSendBlock') { page.render(); await page.prepare(); }
       const tree = page.render();
       const button = elements(tree).find(el => el.type === 'button' && el.props.children !== 'Reject');
       assert.equal(button.props.disabled, true);
       await button.props.onClick(); // final handler also refuses a bypassed UI
       assert.equal(page.sent.length, 0);
-      assert.equal(page.errors.length, 1);
+      // An arbitrary block that cannot be prepared is refused at preparation,
+      // visibly, and a bypassed click has nothing to sign.
+      if (type === 'signAndSendBlock') assert.match(renderToStaticMarkup(tree), /Unable to prepare this block/);
+      else assert.equal(page.errors.length, 1);
     }
   }
   assert(renderToStaticMarkup(React.createElement(TokenAmount, { amount: { toString: 'invalid' }, tokenStandard: 'invalid' })).includes('Invalid amount'));

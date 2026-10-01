@@ -50,15 +50,15 @@ regression checks, and creates a Chrome/Brave-ready ZIP with a SHA-256
 checksum. The workflow artifact is the ZIP itself, without a second artifact
 archive; the checksum is attached to the GitHub Release.
 
-The current extension version is 0.3.3. A push to `main` automatically creates
-the matching `v0.3.3` tag and publishes the ZIP assets to a GitHub Release.
+The current extension version is 0.3.4. A push to `main` automatically creates
+the matching `v0.3.4` tag and publishes the ZIP assets to a GitHub Release.
 Pushes to `development` and `manifest-v3` only create validation artifacts.
 
 For a manual tag-triggered release instead of the automatic `main` release:
 
 ~~~powershell
-git tag v0.3.3
-git push origin v0.3.3
+git tag v0.3.4
+git push origin v0.3.4
 ~~~
 
 No custom repository variables or secrets are required. The release job uses

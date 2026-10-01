@@ -112,11 +112,18 @@ const getAddressInfo = (walletName) => {
 
 const setAddressInfo = (walletName, info) => {
   const all = readJson(keys.addressInfo, {});
-  all[walletName] = {
+  // A same-seed import can inherit knowledge of labels beyond its visible
+  // account list. Keep that deletion inventory across selection/count writes.
+  const previous = Object.prototype.hasOwnProperty.call(all, walletName) ? all[walletName] : null;
+  const hasLabelCount = previous && Object.prototype.hasOwnProperty.call(previous, 'labelAddressCount');
+  if (hasLabelCount && (!Number.isSafeInteger(previous.labelAddressCount) ||
+    previous.labelAddressCount < 1 || previous.labelAddressCount > 0x80000000)) return false;
+  const next = { ...all, [walletName]: {
     selectedAddressIndex: info.selectedAddressIndex,
     maxAddressIndex: info.maxAddressIndex,
-  };
-  return writeJson(keys.addressInfo, all);
+    ...(hasLabelCount ? { labelAddressCount: Math.max(previous.labelAddressCount, info.maxAddressIndex) } : {}),
+  } };
+  return writeJson(keys.addressInfo, next);
 };
 
 const forgetAddressInfo = (walletName) => {
@@ -167,7 +174,7 @@ const getSettings = () => ({ ...defaultSettings, ...readJson(keys.settings, {}) 
 
 const setSetting = (key, value) => {
   const next = { ...getSettings(), [key]: value };
-  writeJson(keys.settings, next);
+  if (!writeJson(keys.settings, next)) throw new Error('Could not save settings. Try again.');
   return next;
 };
 

@@ -1,7 +1,11 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import { Enums, Zenon } from 'znn-ts-sdk';
 
 import vault from '../wallet/vault';
+import requestSigningKey from '../wallet/requestSigningKey';
+import { runApprovalOperation } from '../wallet/approvalOperation';
+import sendApprovalBlock from '../wallet/approvalBlock';
+import { beginPreparedSend } from '../wallet/blockApproval';
 import { invalidateAccountCache } from './useAccount';
 
 // Signing and broadcasting one account block, for the one caller that has to
@@ -26,33 +30,65 @@ import { invalidateAccountCache } from './useAccount';
 
 const useBlockSender = () => {
   const [isSending, setIsSending] = useState(false);
+  const generation = useRef(0);
   const [isGeneratingPlasma, setIsGeneratingPlasma] = useState(false);
 
-  const send = useCallback(async (template, { addressIndex } = {}) => {
+  // `binding` (an approval's wallet account) is checked under the session lock
+  // at every key use and again at the instant publication starts; after that
+  // point a failure means the outcome is unknown, and `onSubmitted` says so.
+  // `prepared` (an approval's reviewed block, blockApproval.js) is signed as
+  // reviewed; `template` is then unused.
+  const send = useCallback(async (template, { addressIndex, assertRequest, expiresAt, binding, onSubmitted, prepared } = {}) => {
+    const current = ++generation.current;
     const zenon = Zenon.getSingleton();
-    const keyPair = await vault.getSigningKeyPair(addressIndex);
-
     setIsSending(true);
-
-    try {
-      const signed = await zenon.send(template, keyPair, (status) => {
-        // `PowStatus.generating` is 0, so this has to compare rather than test
-        // for truth — the obvious `if (status)` reads it as "done".
-        if (status === Enums.PowStatus.generating) {
-          setIsGeneratingPlasma(true);
-        }
-        if (status === Enums.PowStatus.done) {
-          setIsGeneratingPlasma(false);
-        }
+    let submitted = false;
+    const startPublication = binding ? async (block, publish) => {
+      const started = await vault.whileBound(binding, () => {
+        if (block.address?.toString() !== binding.scope.address) throw new Error('The signing account changed.');
+        // Begin the RPC while the selection is locked; never hold the lock
+        // waiting on a remote node. A submitted block cannot be undone.
+        submitted = true;
+        onSubmitted?.();
+        const promise = Promise.resolve(publish());
+        // A later check can stop awaiting the reply; keep its rejection handled
+        // while preserving it for the waiter below.
+        promise.catch(() => {});
+        return { promise };
       });
+      return started.promise;
+    } : undefined;
+    const progress = status => {
+      if (generation.current !== current || (Number.isFinite(expiresAt) && expiresAt <= Date.now())) return;
+      if (status === Enums.PowStatus.generating) setIsGeneratingPlasma(true);
+      if (status === Enums.PowStatus.done) setIsGeneratingPlasma(false);
+    };
+    try {
+      const execute = async operation => {
+        // Consumed before any key lookup or other await: one send per review.
+        const begun = prepared ? beginPreparedSend(prepared) : null;
+        await operation.assertActive();
+        const keyPair = requestSigningKey(await vault.getSigningKeyPair(addressIndex, binding), operation.assertActive);
+        await operation.assertActive();
+        return sendApprovalBlock(zenon, template, keyPair, operation, progress, startPublication, begun);
+      };
+      const signed = assertRequest
+        ? await runApprovalOperation(expiresAt, execute, { assertRequest })
+        : await zenon.send(template, await vault.getSigningKeyPair(addressIndex), progress);
 
       // The balance on screen is now stale by definition.
       invalidateAccountCache();
+      await assertRequest?.();
       return signed;
+    } catch (error) {
+      if (submitted) throw new Error('The transaction may have been submitted. Its outcome is unknown. Check the original account before retrying.');
+      throw error;
     } finally {
       // In `finally`, so an error cannot leave the screen saying it is working.
-      setIsGeneratingPlasma(false);
-      setIsSending(false);
+      if (generation.current === current) {
+        setIsGeneratingPlasma(false);
+        setIsSending(false);
+      }
     }
   }, []);
 

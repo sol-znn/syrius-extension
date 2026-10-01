@@ -1,3 +1,5 @@
+import observeDocumentLifetime from '../../services/utils/documentLifetime';
+
 // The wallet as a page sees it: `window.zenon`.
 //
 // This file runs in the page's own world, injected by the browser rather than
@@ -26,31 +28,42 @@
   const pending = new Map();
   const listeners = new Map();
   let requestCounter = 0;
+  let active = Boolean(document.documentElement);
 
   const nextId = () => {
     requestCounter += 1;
     return `znn-${Date.now().toString(36)}-${requestCounter}`;
   };
 
-  // A request that is waiting on a person has no useful deadline — somebody may
-  // be looking for their password — so only the transport is bounded. If the
-  // content script never answers at all, the promise still settles.
+  // Human approval lasts up to 30 minutes. One extra minute permits worker
+  // alarm delivery; this fallback also settles a lost transport or worker.
   const transportTimeoutMs = 30000;
 
   const request = ({ method, params }) =>
     new Promise((resolve, reject) => {
+      lifetime.check();
+      if (!active) { reject({ code: 4900, message: 'This document is no longer active. Make a new request after returning.' }); return; }
+      if (pending.size >= 32) { reject({ code: -32005, message: 'Too many wallet requests. Wait and retry.' }); return; }
       const id = nextId();
       const needsApproval = method !== 'znn_accounts' && method !== 'znn_chainId' && method !== 'znn_nodeUrl';
 
-      const timer = needsApproval
-        ? null
-        : setTimeout(() => {
-            pending.delete(id);
-            reject({ code: 4900, message: 'The wallet did not respond' });
-          }, transportTimeoutMs);
+      pending.set(id, { resolve, reject, timer: null });
 
-      pending.set(id, { resolve, reject, timer });
-      window.postMessage({ target: outboundTarget, kind: 'request', id, method, params }, window.location.origin);
+      // A prerendered page's request waits for the page to be shown: the relay
+      // holds it until then (Content/index.js), so its clock starts then too,
+      // rather than running out while nobody has opened the page yet.
+      const send = () => {
+        const waiting = pending.get(id);
+        if (!waiting) return;
+        if (document.prerendering) { document.addEventListener('prerenderingchange', send, { once: true }); return; }
+        waiting.timer = setTimeout(() => {
+          pending.delete(id);
+          reject({ code: 4900, message: needsApproval
+            ? 'The wallet did not finish. Verify the outcome before retrying.' : 'The wallet did not respond' });
+        }, needsApproval ? 31 * 60 * 1000 : transportTimeoutMs);
+        window.postMessage({ target: outboundTarget, kind: 'request', id, method, params }, window.location.origin);
+      };
+      send();
     });
 
   const emit = (event, data) => {
@@ -69,7 +82,8 @@
     });
   };
 
-  window.addEventListener('message', (event) => {
+  const receiveMessage = (event) => {
+    lifetime.check();
     // Only messages this window posted to itself. Anything from a frame or
     // another origin is not the content script.
     if (event.source !== window) {
@@ -91,7 +105,9 @@
       if (waiting.timer) {
         clearTimeout(waiting.timer);
       }
-      if (message.error) {
+      if (!message.error && Number.isFinite(message.expiresAt) && (!Number.isFinite(message.acceptedAt) || message.acceptedAt >= message.expiresAt)) {
+        waiting.reject({ code: -32603, message: 'Approval expired. Verify the outcome before retrying.' });
+      } else if (message.error) {
         waiting.reject(message.error);
       } else {
         waiting.resolve(message.result);
@@ -108,7 +124,7 @@
       }
       emit(message.event, message.data);
     }
-  });
+  };
 
   const provider = {
     // Kept from the old shape so anything that sniffed for it still works.
@@ -193,6 +209,25 @@
       return provider;
     },
   };
+
+  // Reject actual provider promises synchronously when leaving. A posted
+  // cancellation message could itself wait in the BFCache task queue.
+  const leave = () => {
+    active = false;
+    for (const waiting of pending.values()) {
+      clearTimeout(waiting.timer);
+      waiting.reject({ code: 4900, message: 'The page left before this request completed. Make a new request after returning.' });
+    }
+    pending.clear();
+    provider.accounts = [];
+    provider.chainId = null;
+  };
+  const enter = () => { active = Boolean(document.documentElement); };
+  const listen = window.addEventListener.bind(window);
+  const lifetime = observeDocumentLifetime({
+    onHide: leave, onShow: enter, onReset: () => { leave(); enter(); },
+    install: () => listen('message', receiveMessage),
+  });
 
   // A page that loaded before the wallet did gets told, rather than having to
   // poll for `window.zenon`.

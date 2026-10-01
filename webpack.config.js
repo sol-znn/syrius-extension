@@ -173,6 +173,7 @@ module.exports = {
 
     new CopyWebpackPlugin({
       patterns: [
+        { from: path.join(__dirname, 'utils/approval-pow-worker.js'), to: 'approval-pow-worker.js', transform: () => require('./utils/approval-pow-worker')() },
         {
           from: './src/manifest.json',
           to: path.resolve(__dirname, 'build'),

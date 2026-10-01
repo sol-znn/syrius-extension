@@ -1227,14 +1227,9 @@ button:disabled {
   }
 }
 
-// Motion is the whole signal here, so when it is not welcome the colour and the
-// wording carry it instead.
-@media (prefers-reduced-motion: reduce) {
-  .transaction.is-generating-plasma .transaction-icon {
-    animation: none;
-    box-shadow: 0 0 0 3px rgba(68, 106, 239, 0.35);
-  }
-}
+// No reduced-motion override. The pulse is how this row shows that proof of
+// work is still running; Windows reports reduced motion whenever "Animation
+// effects" is off, and flattening it made a working row look like a stuck one.
 
 .transaction-data {
   flex: 1;
@@ -2261,18 +2256,24 @@ button:disabled {
 }
 
 //
-// Reduced motion
+// No reduced-motion override
 //
-// Toastify's progress bar is exempt: it is not decorative, its
-// `animation-duration` is the toast's actual on-screen time (`autoClose`
-// milliseconds, set inline) — react-toastify dismisses the toast when that
-// animation ends. Flattening it to 0.01ms here does not calm the motion, it
-// closes every toast almost the instant it opens, for anyone with reduced
-// motion turned on.
-@media (prefers-reduced-motion: reduce) {
-  *:not(.Toastify__progress-bar) {
-    animation-duration: 0.01ms !important;
-    animation-iteration-count: 1 !important;
-    transition-duration: 0.01ms !important;
+// Motion in the wallet is how it shows that the chain is live and a value just
+// changed, so it runs whatever the OS reports. The blanket rule that used to be
+// here cut every animation and transition to 0.01ms; Windows reports reduced
+// motion whenever "Animation effects" is off, which nobody on these machines
+// chose, and the wallet looked the same loading as broken.
+
+// Contract arguments are always visible and can contain full addresses, large
+// integer quantities and long text. A vertical layout avoids truncating values.
+.contract-arguments {
+  margin: 16px 0 0;
+  dt { color: var(--text-faint); font-size: 11px; margin-top: 12px; }
+  dd {
+    margin: 4px 0 0;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    unicode-bidi: plaintext;
+    font-variant-numeric: tabular-nums;
   }
 }

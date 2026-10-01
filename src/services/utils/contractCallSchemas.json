@@ -1,0 +1,137 @@
+{
+  "revision": "667a69d9e9a418edf7580b08492ba5dcb9efd63a",
+  "contracts": {
+    "plasma": {
+      "address": "z1qxemdeddedxplasmaxxxxxxxxxxxxxxxxsctrp",
+      "methods": [
+        {"name": "Fuse","inputs": [{"name": "address","type": "address"}]},
+        {"name": "CancelFuse","inputs": [{"name": "id","type": "hash"}]}
+      ]
+    },
+    "pillar": {
+      "address": "z1qxemdeddedxpyllarxxxxxxxxxxxxxxxsy3fmg",
+      "methods": [
+        {"name": "Update","inputs": []},
+        {"name": "Register","inputs": [{"name": "name","type": "string"},{"name": "producerAddress","type": "address"},{"name": "rewardAddress","type": "address"},{"name": "giveBlockRewardPercentage","type": "uint8"},{"name": "giveDelegateRewardPercentage","type": "uint8"}]},
+        {"name": "RegisterLegacy","inputs": [{"name": "name","type": "string"},{"name": "producerAddress","type": "address"},{"name": "rewardAddress","type": "address"},{"name": "giveBlockRewardPercentage","type": "uint8"},{"name": "giveDelegateRewardPercentage","type": "uint8"},{"name": "publicKey","type": "string"},{"name": "signature","type": "string"}]},
+        {"name": "UpdatePillar","inputs": [{"name": "name","type": "string"},{"name": "producerAddress","type": "address"},{"name": "rewardAddress","type": "address"},{"name": "giveBlockRewardPercentage","type": "uint8"},{"name": "giveDelegateRewardPercentage","type": "uint8"}]},
+        {"name": "DepositQsr","inputs": []},
+        {"name": "WithdrawQsr","inputs": []},
+        {"name": "Revoke","inputs": [{"name": "name","type": "string"}]},
+        {"name": "Delegate","inputs": [{"name": "name","type": "string"}]},
+        {"name": "Undelegate","inputs": []},
+        {"name": "CollectReward","inputs": []}
+      ]
+    },
+    "stake": {
+      "address": "z1qxemdeddedxstakexxxxxxxxxxxxxxxxjv8v62",
+      "methods": [
+        {"name": "Stake","inputs": [{"name": "durationInSec","type": "int64"}]},
+        {"name": "Cancel","inputs": [{"name": "id","type": "hash"}]},
+        {"name": "CollectReward","inputs": []},
+        {"name": "Update","inputs": []}
+      ]
+    },
+    "sentinel": {
+      "address": "z1qxemdeddedxsentynelxxxxxxxxxxxxxwy0r2r",
+      "methods": [
+        {"name": "DepositQsr","inputs": []},
+        {"name": "WithdrawQsr","inputs": []},
+        {"name": "Register","inputs": []},
+        {"name": "Revoke","inputs": []},
+        {"name": "Update","inputs": []},
+        {"name": "CollectReward","inputs": []}
+      ]
+    },
+    "token": {
+      "address": "z1qxemdeddedxt0kenxxxxxxxxxxxxxxxxh9amk0",
+      "methods": [
+        {"name": "IssueToken","inputs": [{"name": "tokenName","type": "string"},{"name": "tokenSymbol","type": "string"},{"name": "tokenDomain","type": "string"},{"name": "totalSupply","type": "uint256"},{"name": "maxSupply","type": "uint256"},{"name": "decimals","type": "uint8"},{"name": "isMintable","type": "bool"},{"name": "isBurnable","type": "bool"},{"name": "isUtility","type": "bool"}]},
+        {"name": "Mint","inputs": [{"name": "tokenStandard","type": "tokenStandard"},{"name": "amount","type": "uint256"},{"name": "receiveAddress","type": "address"}]},
+        {"name": "Burn","inputs": []},
+        {"name": "UpdateToken","inputs": [{"name": "tokenStandard","type": "tokenStandard"},{"name": "owner","type": "address"},{"name": "isMintable","type": "bool"},{"name": "isBurnable","type": "bool"}]}
+      ]
+    },
+    "htlc": {
+      "address": "z1qxemdeddedxhtlcxxxxxxxxxxxxxxxxxygecvw",
+      "methods": [
+        {"name": "Create","inputs": [{"name": "hashLocked","type": "address"},{"name": "expirationTime","type": "int64"},{"name": "hashType","type": "uint8"},{"name": "keyMaxSize","type": "uint8"},{"name": "hashLock","type": "bytes"}]},
+        {"name": "Reclaim","inputs": [{"name": "id","type": "hash"}]},
+        {"name": "Unlock","inputs": [{"name": "id","type": "hash"},{"name": "preimage","type": "bytes"}]},
+        {"name": "DenyProxyUnlock","inputs": []},
+        {"name": "AllowProxyUnlock","inputs": []}
+      ]
+    },
+    "liquidity": {
+      "address": "z1qxemdeddedxlyquydytyxxxxxxxxxxxxflaaae",
+      "methods": [
+        {"name": "Update","inputs": []},
+        {"name": "Donate","inputs": []},
+        {"name": "Fund","inputs": [{"name": "znnReward","type": "uint256"},{"name": "qsrReward","type": "uint256"}]},
+        {"name": "BurnZnn","inputs": [{"name": "burnAmount","type": "uint256"}]},
+        {"name": "SetTokenTuple","inputs": [{"name": "tokenStandards","type": "string[]"},{"name": "znnPercentages","type": "uint32[]"},{"name": "qsrPercentages","type": "uint32[]"},{"name": "minAmounts","type": "uint256[]"}]},
+        {"name": "NominateGuardians","inputs": [{"name": "guardians","type": "address[]"}]},
+        {"name": "ProposeAdministrator","inputs": [{"name": "address","type": "address"}]},
+        {"name": "Emergency","inputs": []},
+        {"name": "SetIsHalted","inputs": [{"name": "isHalted","type": "bool"}]},
+        {"name": "LiquidityStake","inputs": [{"name": "durationInSec","type": "int64"}]},
+        {"name": "CancelLiquidityStake","inputs": [{"name": "id","type": "hash"}]},
+        {"name": "UnlockLiquidityStakeEntries","inputs": []},
+        {"name": "SetAdditionalReward","inputs": [{"name": "znnReward","type": "uint256"},{"name": "qsrReward","type": "uint256"}]},
+        {"name": "CollectReward","inputs": []},
+        {"name": "ChangeAdministrator","inputs": [{"name": "administrator","type": "address"}]}
+      ]
+    },
+    "accelerator": {
+      "address": "z1qxemdeddedxaccelerat0rxxxxxxxxxxp4tk22",
+      "methods": [
+        {"name": "Update","inputs": []},
+        {"name": "Donate","inputs": []},
+        {"name": "CreateProject","inputs": [{"name": "name","type": "string"},{"name": "description","type": "string"},{"name": "url","type": "string"},{"name": "znnFundsNeeded","type": "uint256"},{"name": "qsrFundsNeeded","type": "uint256"}]},
+        {"name": "AddPhase","inputs": [{"name": "id","type": "hash"},{"name": "name","type": "string"},{"name": "description","type": "string"},{"name": "url","type": "string"},{"name": "znnFundsNeeded","type": "uint256"},{"name": "qsrFundsNeeded","type": "uint256"}]},
+        {"name": "UpdatePhase","inputs": [{"name": "id","type": "hash"},{"name": "name","type": "string"},{"name": "description","type": "string"},{"name": "url","type": "string"},{"name": "znnFundsNeeded","type": "uint256"},{"name": "qsrFundsNeeded","type": "uint256"}]},
+        {"name": "VoteByName","inputs": [{"name": "id","type": "hash"},{"name": "name","type": "string"},{"name": "vote","type": "uint8"}]},
+        {"name": "VoteByProdAddress","inputs": [{"name": "id","type": "hash"},{"name": "vote","type": "uint8"}]}
+      ]
+    },
+    "swap": {
+      "address": "z1qxemdeddedxswapxxxxxxxxxxxxxxxxxxl4yww",
+      "methods": [
+        {"name": "RetrieveAssets","inputs": [{"name": "publicKey","type": "string"},{"name": "signature","type": "string"}]}
+      ]
+    },
+    "bridge": {
+      "address": "z1qxemdeddedxdrydgexxxxxxxxxxxxxxxmqgr0d",
+      "methods": [
+        {"name": "WrapToken","inputs": [{"name": "networkClass","type": "uint32"},{"name": "chainId","type": "uint32"},{"name": "toAddress","type": "string"}]},
+        {"name": "UpdateWrapRequest","inputs": [{"name": "id","type": "hash"},{"name": "signature","type": "string"}]},
+        {"name": "SetNetwork","inputs": [{"name": "networkClass","type": "uint32"},{"name": "chainId","type": "uint32"},{"name": "name","type": "string"},{"name": "contractAddress","type": "string"},{"name": "metadata","type": "string"}]},
+        {"name": "RemoveNetwork","inputs": [{"name": "networkClass","type": "uint32"},{"name": "chainId","type": "uint32"}]},
+        {"name": "SetTokenPair","inputs": [{"name": "networkClass","type": "uint32"},{"name": "chainId","type": "uint32"},{"name": "tokenStandard","type": "tokenStandard"},{"name": "tokenAddress","type": "string"},{"name": "bridgeable","type": "bool"},{"name": "redeemable","type": "bool"},{"name": "owned","type": "bool"},{"name": "minAmount","type": "uint256"},{"name": "feePercentage","type": "uint32"},{"name": "redeemDelay","type": "uint32"},{"name": "metadata","type": "string"}]},
+        {"name": "SetNetworkMetadata","inputs": [{"name": "networkClass","type": "uint32"},{"name": "chainId","type": "uint32"},{"name": "metadata","type": "string"}]},
+        {"name": "RemoveTokenPair","inputs": [{"name": "networkClass","type": "uint32"},{"name": "chainId","type": "uint32"},{"name": "tokenStandard","type": "tokenStandard"},{"name": "tokenAddress","type": "string"}]},
+        {"name": "Halt","inputs": [{"name": "signature","type": "string"}]},
+        {"name": "Unhalt","inputs": []},
+        {"name": "Emergency","inputs": []},
+        {"name": "ChangeTssECDSAPubKey","inputs": [{"name": "pubKey","type": "string"},{"name": "oldPubKeySignature","type": "string"},{"name": "newPubKeySignature","type": "string"}]},
+        {"name": "ChangeAdministrator","inputs": [{"name": "administrator","type": "address"}]},
+        {"name": "ProposeAdministrator","inputs": [{"name": "address","type": "address"}]},
+        {"name": "SetAllowKeyGen","inputs": [{"name": "allowKeyGen","type": "bool"}]},
+        {"name": "SetRedeemDelay","inputs": [{"name": "redeemDelay","type": "uint64"}]},
+        {"name": "SetBridgeMetadata","inputs": [{"name": "metadata","type": "string"}]},
+        {"name": "UnwrapToken","inputs": [{"name": "networkClass","type": "uint32"},{"name": "chainId","type": "uint32"},{"name": "transactionHash","type": "hash"},{"name": "logIndex","type": "uint32"},{"name": "toAddress","type": "address"},{"name": "tokenAddress","type": "string"},{"name": "amount","type": "uint256"},{"name": "signature","type": "string"}]},
+        {"name": "RevokeUnwrapRequest","inputs": [{"name": "transactionHash","type": "hash"},{"name": "logIndex","type": "uint32"}]},
+        {"name": "Redeem","inputs": [{"name": "transactionHash","type": "hash"},{"name": "logIndex","type": "uint32"}]},
+        {"name": "NominateGuardians","inputs": [{"name": "guardians","type": "address[]"}]},
+        {"name": "SetOrchestratorInfo","inputs": [{"name": "windowSize","type": "uint64"},{"name": "keyGenThreshold","type": "uint32"},{"name": "confirmationsToFinality","type": "uint32"},{"name": "estimatedMomentumTime","type": "uint32"}]}
+      ]
+    },
+    "spork": {
+      "address": "z1qxemdeddedxsp0rkxxxxxxxxxxxxxxxx956u48",
+      "methods": [
+        {"name": "CreateSpork","inputs": [{"name": "name","type": "string"},{"name": "description","type": "string"}]},
+        {"name": "ActivateSpork","inputs": [{"name": "id","type": "hash"}]}
+      ]
+    }
+  }
+}

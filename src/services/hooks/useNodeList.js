@@ -1,5 +1,5 @@
 import { useCallback, useContext, useState } from 'react';
-import { useDispatch, useSelector } from 'react-redux';
+import { useDispatch } from 'react-redux';
 import { Zenon } from 'znn-ts-sdk';
 
 import { SpinnerContext } from './spinner/spinnerContext';
@@ -12,7 +12,7 @@ import {
   setNodeList,
 } from '../utils/storage';
 import { notify } from '../utils/notify';
-import { announceNode } from '../wallet/announce';
+import { announceNode, captureLifetime } from '../wallet/announce';
 
 // The node list, shared by the two screens that show it.
 //
@@ -28,7 +28,6 @@ const isValidNodeUrl = (url) => /^wss?:\/\/.+/i.test((url || '').trim());
 const useNodeList = () => {
   const dispatch = useDispatch();
   const { showSpinner, hideSpinner } = useContext(SpinnerContext);
-  const address = useSelector((state) => state.wallet.address);
 
   const [nodes, setNodes] = useState(() => getNodeList());
   const [currentNode, setCurrentNode] = useState(() => getCurrentNodeUrl() || defaultNodeUrl);
@@ -65,6 +64,7 @@ const useNodeList = () => {
   // and the person is on the screen where they can fix it.
   const select = useCallback(
     async (url) => {
+      const activity = captureLifetime();
       const previous = currentNode;
       const zenon = Zenon.getSingleton();
 
@@ -79,7 +79,7 @@ const useNodeList = () => {
         setCurrentNodeUrl(url);
         dispatch(storeNodeUrl(url));
         dispatch(storeIsConnected(true));
-        await announceNode(url, address);
+        await announceNode(activity);
 
         notify.success('Connected');
         return true;
@@ -99,7 +99,7 @@ const useNodeList = () => {
         setIsConnecting(false);
       }
     },
-    [address, currentNode, dispatch, hideSpinner, showSpinner]
+    [currentNode, dispatch, hideSpinner, showSpinner]
   );
 
   return { nodes, currentNode, isConnecting, add, remove, select, isValidNodeUrl };

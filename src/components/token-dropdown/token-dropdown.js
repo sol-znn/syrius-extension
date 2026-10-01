@@ -14,6 +14,20 @@ import { formatAmount, truncateAddress } from '../../services/utils/format';
 //
 // It also showed each option as a symbol and a truncated standard and nothing
 // else, so there was no way to tell which of two tokens you had more of.
+//
+// This is a display, like the Tokens tab: a custom token is labelled with the
+// symbol and decimals from the account's balance data. What is signed never
+// reads these; the amount and the confirmation use authorizationMetadata,
+// which knows only ZNN and QSR.
+const displayOf = (option) => {
+  const metadata = authorizationMetadata(option.token.tokenStandard);
+  if (metadata.isNative) return { symbol: metadata.symbol, decimals: metadata.decimals };
+  const { symbol, decimals } = option.token;
+  return {
+    symbol: typeof symbol === 'string' && symbol.trim() ? symbol : 'Custom token',
+    decimals: Number.isInteger(decimals) && decimals >= 0 ? decimals : 0,
+  };
+};
 
 const TokenDropdown = React.forwardRef(
   ({ name, className, options = [], onChange, onBlur, value, placeholder, label }, ref) => {
@@ -40,7 +54,7 @@ const TokenDropdown = React.forwardRef(
     }, [isOpen, onBlur]);
 
     const selected = selectedIndex >= 0 ? options[selectedIndex] : null;
-    const selectedMetadata = selected ? authorizationMetadata(selected.token.tokenStandard) : null;
+    const selectedDisplay = selected ? displayOf(selected) : null;
 
     return (
       <div className={`Dropdown-root ${isOpen ? 'is-open' : ''}`} ref={rootRef}>
@@ -55,10 +69,8 @@ const TokenDropdown = React.forwardRef(
         >
           {selected ? (
             <span className="token-option">
-              <span className="token-option-symbol">{selectedMetadata.isNative ? selectedMetadata.symbol : 'Custom token'}</span>
-              <span className="token-option-balance">
-                {formatAmount(selected.balance, selectedMetadata.decimals)}{selectedMetadata.isNative ? '' : ' base units'}
-              </span>
+              <span className="token-option-symbol">{selectedDisplay.symbol}</span>
+              <span className="token-option-balance">{formatAmount(selected.balance, selectedDisplay.decimals)}</span>
             </span>
           ) : (
             <span>{placeholder}</span>
@@ -70,7 +82,7 @@ const TokenDropdown = React.forwardRef(
           <div className="Dropdown-menu">
             {options.map((option, index) => {
               const zts = option?.token?.tokenStandard?.toString() || '';
-              const metadata = authorizationMetadata(zts);
+              const display = displayOf(option);
 
               return (
                 <div
@@ -82,11 +94,9 @@ const TokenDropdown = React.forwardRef(
                   }}
                 >
                   <span className="token-option">
-                    <span className="token-option-symbol">{metadata.isNative ? metadata.symbol : 'Custom token'}</span>
+                    <span className="token-option-symbol">{display.symbol}</span>
                     <span className="token-option-standard">{truncateAddress(zts, 8, 4)}</span>
-                    <span className="token-option-balance">
-                      {formatAmount(option.balance, metadata.decimals)}{metadata.isNative ? '' : ' base units'}
-                    </span>
+                    <span className="token-option-balance">{formatAmount(option.balance, display.decimals)}</span>
                   </span>
                 </div>
               );

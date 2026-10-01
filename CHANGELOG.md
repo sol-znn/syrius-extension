@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.3.4
+
+- Locking, expiry and wallet removal now revoke every open wallet window's
+  keys, not just the one that locked. Lock durations are 5, 15 or 60 minutes,
+  or On close, and a change applies to the running session.
+- A site's connection is to one wallet and account. Switching accounts hides
+  the address from sites that were not approved for the new one, and every
+  approval is bound to the account it was shown for.
+- Every dApp approval is single use, expires, and is tied to the page that
+  asked: navigating away, going back or rewriting the page cancels it, and an
+  answer can never reach a different page.
+- The approval screen signs exactly the block it showed, and embedded
+  contract calls list every decoded argument.
+- Sites see no address, chain or node until they are approved, see only the
+  node's host, and a disconnect holds even if the browser restarts.
+- The approval window no longer opens repeatedly for one site, and connection
+  requests are bounded per site and in total.
+- New passwords need at least 8 characters with a lowercase letter, an
+  uppercase letter, a digit and one of `!@#$%^&*`. Existing passwords still
+  unlock.
+- A custom token's amount is entered and confirmed in exact base units: its
+  decimals come from the node, which cannot vouch for them. The send dropdown
+  still shows its symbol and balance.
+- A page Chrome prerenders (an address-bar prediction, a site's speculation
+  rules) now reads its account once it is shown and receives events, instead
+  of failing its first read with "the requesting document has left".
+- A page whose navigation never completes (a 204 response, a download) keeps
+  receiving account and chain events; they used to stop until a reload.
+- **New permission: `webNavigation`.** Approvals are cancelled when their page
+  navigates, even if the page blocks its own unload events, and Chrome only
+  reports that to an extension holding this permission. Chrome describes it
+  on the install prompt as "Read your browsing history", and asks anyone
+  updating from 0.3.3 to accept it before the extension runs again.
+- Locked dependencies updated for npm audit advisories (brace-expansion,
+  fast-uri, serialize-javascript).
+
 ## 0.3.3
 
 - Fixed a receive-history bug where an incoming transfer's "From" address and

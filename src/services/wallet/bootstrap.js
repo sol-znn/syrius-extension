@@ -13,7 +13,6 @@ import {
   setLastWalletName,
 } from '../utils/storage';
 import { announceUnlock } from './announce';
-import session from './session';
 import vault from './vault';
 
 // Everything that has to happen between "this is the right password" and "the
@@ -26,59 +25,49 @@ import vault from './vault';
 // would have fixed it. Connecting is attempted here but is not allowed to fail
 // the unlock; the header reports the connection separately.
 
-const connectToNode = async (dispatch) => {
+const connectToNode = async (dispatch, isCurrent = () => true) => {
   const nodeUrl = getCurrentNodeUrl() || defaultNodeUrl;
-  setCurrentNodeUrl(nodeUrl);
   dispatch(storeNodeUrl(nodeUrl));
 
   try {
+    // Inside the try: remembering the node is optional, and a storage failure
+    // here must not undo an unlock that has already been adopted.
+    setCurrentNodeUrl(nodeUrl);
     await Zenon.getSingleton().initialize(nodeUrl, false, 8000);
-    dispatch(storeIsConnected(true));
+    if (isCurrent()) dispatch(storeIsConnected(true));
     return true;
   } catch (err) {
-    dispatch(storeIsConnected(false));
+    if (isCurrent()) dispatch(storeIsConnected(false));
     return false;
   }
 };
 
-// `unlock` is either `{password}` for somebody typing one, or `{entropy}` for
-// resuming a session that has not expired. The entropy path skips Argon2id
-// entirely, which is the difference between a popup that opens instantly and
-// one that hangs for a second every time.
-const completeUnlock = async ({ walletName, password, entropy, dispatch }) => {
-  if (entropy) {
-    vault.unlockWithEntropy(walletName, entropy);
-  } else {
-    await vault.unlockWithPassword(walletName, password);
-  }
-
-  // Recorded only once the password (or entropy) above has actually checked
-  // out — a wrong guess must never become the screen's next default.
-  setLastWalletName(walletName);
-
+// Restore carries the original lease identity; only a password creates a new
+// one. Slow address/node work cannot re-publish a revoked unlock.
+const completeUnlock = async ({ walletName, password, sessionRecord, dispatch }) => {
   const addressInfo = getAddressInfo(walletName);
-  vault.setSelectedIndex(addressInfo.selectedAddressIndex);
-  const address = await vault.getAddress();
-
-  dispatch(
-    walletUnlocked({
-      walletName,
-      address,
-      selectedAddressIndex: addressInfo.selectedAddressIndex,
-      maxAddressIndex: addressInfo.maxAddressIndex,
-    })
-  );
+  // Recorded once the password (or session) has checked out — a wrong guess
+  // must never become the screen's next default — and before the keys are
+  // adopted, so a failed write leaves nothing half unlocked.
+  const prepare = () => setLastWalletName(walletName);
+  // A resumed session keeps the account it was on; the shared selection, not
+  // this window's saved default, is what sites and approvals are bound to.
+  const index = sessionRecord ? sessionRecord.scope?.index : addressInfo.selectedAddressIndex;
+  const lifetime = sessionRecord
+    ? await vault.restore(sessionRecord, prepare)
+    : await vault.unlockWithPassword(walletName, password, index, prepare);
+  const address = await vault.getAddress(index, lifetime);
+  await vault.assertSession(lifetime);
+  dispatch(walletUnlocked({
+    walletName, address,
+    selectedAddressIndex: index,
+    // A saved selection past the saved count would draw no selected row.
+    maxAddressIndex: Math.max(addressInfo.maxAddressIndex, index + 1),
+  }));
   dispatch(storeChainIdentifier(Zenon.getChainIdentifier()));
-
-  await session.save({
-    walletName,
-    entropy: vault.getEntropy(),
-    selectedAddressIndex: addressInfo.selectedAddressIndex,
-  });
-
-  const isConnected = await connectToNode(dispatch);
-  await announceUnlock(address);
-
+  const isConnected = await connectToNode(dispatch, () => vault.isCurrent(lifetime));
+  await vault.assertSession(lifetime);
+  await announceUnlock(address, lifetime);
   return { address, isConnected };
 };
 
