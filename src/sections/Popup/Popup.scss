@@ -1228,10 +1228,6 @@ button:disabled {
   }
 }
 
-// No reduced-motion override. The pulse is how this row shows that proof of
-// work is still running; Windows reports reduced motion whenever "Animation
-// effects" is off, and flattening it made a working row look like a stuck one.
-
 .transaction-data {
   flex: 1;
   min-width: 0;
@@ -1291,6 +1287,10 @@ button:disabled {
 
 .pending-dot:hover::after {
   opacity: 1;
+}
+
+.pending-label {
+  display: none;
 }
 
 // The halo. A second ring rather than scaling the dot itself, so the dot stays
@@ -2220,6 +2220,13 @@ button:disabled {
 
 .pow-spinner-container {
   display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.pow-spinner-content {
+  display: none;
+  font-size: 11px;
 }
 
 .pow-spinner {
@@ -2293,14 +2300,64 @@ button:disabled {
   }
 }
 
-//
-// No reduced-motion override
-//
-// Motion in the wallet is how it shows that the chain is live and a value just
-// changed, so it runs whatever the OS reports. The blanket rule that used to be
-// here cut every animation and transition to 0.01ms; Windows reports reduced
-// motion whenever "Animation effects" is off, which nobody on these machines
-// chose, and the wallet looked the same loading as broken.
+// Keep work and confirmation states readable without perpetual motion.
+// Toastify uses the progress animation's end event for its dismissal timer;
+// preserve that timer while hiding its moving bar.
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition: none !important;
+    scroll-behavior: auto !important;
+  }
+
+  .spinner,
+  .pow-spinner,
+  .pending-dot,
+  .transaction.is-generating-plasma .transaction-icon {
+    animation: none;
+  }
+
+  .transaction.is-generating-plasma .transaction-icon {
+    box-shadow: inset 0 0 0 1px var(--qsr);
+  }
+
+  .transaction-label {
+    min-width: 0;
+    flex-wrap: wrap;
+  }
+
+  .pending-dot {
+    width: auto;
+    height: auto;
+    border-radius: 0;
+    background: none;
+    color: var(--warning);
+    font-size: 11px;
+    font-weight: 500;
+  }
+
+  .pending-label,
+  .pow-spinner-content {
+    display: inline;
+  }
+
+  .pending-dot::after {
+    display: none;
+  }
+
+  .Toastify__toast {
+    animation-duration: 1ms !important;
+  }
+
+  .toast-successbar .Toastify--animate-icon {
+    animation: none;
+  }
+
+  .Toastify__progress-bar {
+    visibility: hidden;
+  }
+}
 
 // Contract arguments are always visible and can contain full addresses, large
 // integer quantities and long text. A vertical layout avoids truncating values.

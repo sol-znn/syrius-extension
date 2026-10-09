@@ -86,7 +86,9 @@ const TransactionItem = ({
                 role="status"
                 aria-label="Unconfirmed"
                 data-tooltip="Unconfirmed"
-              />
+              >
+                <span className="pending-label" aria-hidden="true">Unconfirmed</span>
+              </span>
             )}
           </span>
           {hasAmount && (
