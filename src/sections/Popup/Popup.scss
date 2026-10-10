@@ -1787,6 +1787,12 @@ button:disabled {
   }
 }
 
+// Shown above whichever screen is open (tabsLayout), outside that screen's own
+// padding, so it brings the same gutter with it to line up with the cards.
+.journal-notice {
+  margin: 12px 12px 0;
+}
+
 //
 // Sites
 //

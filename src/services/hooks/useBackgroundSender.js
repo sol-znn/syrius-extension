@@ -4,6 +4,7 @@ import { Enums, Zenon } from 'znn-ts-sdk';
 
 import vault from '../wallet/vault';
 import { captureHistoryNetwork } from '../wallet/historyObservation';
+import sendJournaled from '../wallet/publisher';
 import { invalidateAccountCache } from './useAccount';
 import { notify } from '../utils/notify';
 import { readableError } from '../utils/errors';
@@ -62,7 +63,9 @@ const useBackgroundSender = () => {
         try {
           const keyPair = await vault.getSigningKeyPair(addressIndex);
 
-          const signed = await zenon.send(template, keyPair, (status) => {
+          // Recorded before it is sent, and under this account's turn: see
+          // wallet/journal.js.
+          const signed = await sendJournaled(zenon, template, keyPair, { onPow: (status) => {
             // `PowStatus.generating` is 0, so this has to compare rather than
             // test for truth — the obvious `if (status)` reads it as "done".
             if (status === Enums.PowStatus.generating) {
@@ -73,7 +76,7 @@ const useBackgroundSender = () => {
             if (status === Enums.PowStatus.done) {
               dispatch(updatePendingTransaction({ id, status: pendingStatus.sending }));
             }
-          });
+          } });
 
           // The balance on screen is now stale by definition.
           invalidateAccountCache();

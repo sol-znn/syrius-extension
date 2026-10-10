@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+- A send that is interrupted is no longer a send that may be signed twice.
+  Every block is recorded before it is sent; if the popup closes, the
+  connection drops or the node never answers, the wallet looks that block up
+  and, if the node never saw it, sends the same bytes again. It does not sign
+  a replacement on its own.
+- Sends, receives and site-approved sends from one account now take turns,
+  across windows. Two of them can no longer build on the same block and have
+  one refused or displaced. A send you start goes ahead of blocks still
+  waiting to be received.
+- While a sent block's outcome is unknown the dashboard says so, holds that
+  account's next send, and offers to stop waiting.
+- The record is encrypted under a key derived from the wallet's seed, readable
+  only while that wallet is unlocked, kept for 24 hours after a block settles,
+  limited to 100 per account, and deleted with the wallet.
+
 ## 0.3.4
 
 - Locking, expiry and wallet removal now revoke every open wallet window's

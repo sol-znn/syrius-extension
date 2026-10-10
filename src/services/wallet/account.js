@@ -1,6 +1,7 @@
 import { Enums, Primitives } from 'znn-ts-sdk';
 import { toDecimals } from '../utils/format';
 import { nativeTokens, normalizeTokenStandard, znnZts, qsrZts } from './tokenMetadata';
+import sendJournaled from './publisher';
 
 // Reading an account, once, in a shape the screens can use.
 //
@@ -145,13 +146,13 @@ const receivePendingBlocks = async (
 
       onBlock?.(block, receivePhase.started);
       try {
-        await zenon.send(template, keyPair, (status) => {
+        await sendJournaled(zenon, template, keyPair, { path: 'receive', onPow: (status) => {
           // `PowStatus.generating` is 0, so this has to compare rather than
           // test for truth — the obvious `if (status)` reads it as "done".
           if (status === Enums.PowStatus.generating) {
             onBlock?.(block, receivePhase.generatingPlasma);
           }
-        });
+        } });
       } finally {
         // In `finally`, so a block that fails to publish cannot leave a row
         // pulsing on the dashboard forever.
