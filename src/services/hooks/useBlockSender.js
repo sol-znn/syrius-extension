@@ -6,6 +6,8 @@ import requestSigningKey from '../wallet/requestSigningKey';
 import { runApprovalOperation } from '../wallet/approvalOperation';
 import sendApprovalBlock from '../wallet/approvalBlock';
 import { beginPreparedSend } from '../wallet/blockApproval';
+import journal from '../wallet/journal';
+import sendJournaled from '../wallet/publisher';
 import { invalidateAccountCache } from './useAccount';
 
 // Signing and broadcasting one account block, for the one caller that has to
@@ -43,21 +45,40 @@ const useBlockSender = () => {
     const zenon = Zenon.getSingleton();
     setIsSending(true);
     let submitted = false;
-    const startPublication = binding ? async (block, publish) => {
-      const started = await vault.whileBound(binding, () => {
-        if (block.address?.toString() !== binding.scope.address) throw new Error('The signing account changed.');
-        // Begin the RPC while the selection is locked; never hold the lock
-        // waiting on a remote node. A submitted block cannot be undone.
-        submitted = true;
-        onSubmitted?.();
-        const promise = Promise.resolve(publish());
-        // A later check can stop awaiting the reply; keep its rejection handled
-        // while preserving it for the waiter below.
-        promise.catch(() => {});
-        return { promise };
-      });
-      return started.promise;
-    } : undefined;
+    // The signed block is recorded under the account's turn before the
+    // selection lock is taken: the journal derives its key through that same
+    // lock, and nothing may wait on storage while holding it. If the block is
+    // then never sent (the account changed), the record says so.
+    const startPublication = entry => async (block, publish) => {
+      await entry.start(block);
+      let promise;
+      try {
+        if (binding) {
+          promise = (await vault.whileBound(binding, () => {
+            if (block.address?.toString() !== binding.scope.address) throw new Error('The signing account changed.');
+            // Begin the RPC while the selection is locked; never hold the lock
+            // waiting on a remote node. A submitted block cannot be undone.
+            submitted = true;
+            onSubmitted?.();
+            const sending = Promise.resolve(publish());
+            // A later check can stop awaiting the reply; keep its rejection
+            // handled while preserving it for the waiter below.
+            sending.catch(() => {});
+            return { sending };
+          })).sending;
+        } else {
+          promise = Promise.resolve(publish());
+          promise.catch(() => {});
+        }
+      } catch (error) {
+        await entry.settle(Promise.reject(error), { sent: false }).catch(() => {});
+        throw error;
+      }
+      // The journal learns the outcome even if this window stops waiting.
+      const settled = entry.settle(promise);
+      settled.catch(() => {});
+      return promise;
+    };
     const progress = status => {
       if (generation.current !== current || (Number.isFinite(expiresAt) && expiresAt <= Date.now())) return;
       if (status === Enums.PowStatus.generating) setIsGeneratingPlasma(true);
@@ -70,11 +91,19 @@ const useBlockSender = () => {
         await operation.assertActive();
         const keyPair = requestSigningKey(await vault.getSigningKeyPair(addressIndex, binding), operation.assertActive);
         await operation.assertActive();
-        return sendApprovalBlock(zenon, template, keyPair, operation, progress, startPublication, begun);
+        const address = (await keyPair.getAddress()).toString();
+        await operation.assertActive();
+        // The wait for a turn is bounded by the approval's own deadline. A
+        // transfer is filled in once the turn is held; a reviewed block was
+        // filled in at review, so if the block ahead of it lands, the frontier
+        // has moved and the node refuses it, which is the answer it should get.
+        return journal.run(operation.context(zenon), address,
+          { path: 'approval', waitMs: Math.max(0, Math.min(journal.defaultWaitMs, expiresAt - Date.now())) },
+          entry => sendApprovalBlock(zenon, template, keyPair, operation, progress, startPublication(entry), begun));
       };
       const signed = assertRequest
         ? await runApprovalOperation(expiresAt, execute, { assertRequest })
-        : await zenon.send(template, await vault.getSigningKeyPair(addressIndex), progress);
+        : await sendJournaled(zenon, template, await vault.getSigningKeyPair(addressIndex), { onPow: progress });
 
       // The balance on screen is now stale by definition.
       invalidateAccountCache();

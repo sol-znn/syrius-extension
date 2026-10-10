@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const babel = require('@babel/core');
+const { journalStubs } = require('./fixtures/journal-stub');
 const React = require('react');
 const { renderToStaticMarkup } = require('react-dom/server');
 global.window = { crypto: crypto.webcrypto }; global.self = global.window;
@@ -39,6 +40,8 @@ const loader = (environment, overrides = () => undefined) => {
     if (!compiled.has(filename)) compiled.set(filename, babel.transformFileSync(filename, { presets: [['@babel/preset-env', { targets: { node: 'current' } }], '@babel/preset-react'], configFile: false, babelrc: false }).code);
     const requireModule = id => {
       const replacement = overrides(id); if (replacement !== undefined) return replacement;
+      // The journal has its own suite; see fixtures/journal-stub.js.
+      const journaled = journalStubs(id); if (journaled !== undefined) return journaled;
       if (!id.startsWith('.')) return require(id);
       const target = path.resolve(path.dirname(filename), id); return load(path.extname(target) ? target : target + '.js');
     };

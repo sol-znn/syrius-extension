@@ -8,6 +8,7 @@
 const assert = require('node:assert/strict');
 const path = require('node:path');
 const babel = require('@babel/core');
+const { journalStubs } = require('./fixtures/journal-stub');
 const React = require('react');
 global.window = { crypto: require('node:crypto').webcrypto }; global.self = global.window;
 const sdkStorage = new Map();
@@ -31,6 +32,8 @@ const loader = (environment, override = () => undefined) => {
     if (!compiled.has(filename)) compiled.set(filename, compile(path.relative(root, filename)));
     const requireModule = id => {
       const replacement = override(id); if (replacement !== undefined) return replacement;
+      // The journal has its own suite; see fixtures/journal-stub.js.
+      const journaled = journalStubs(id); if (journaled !== undefined) return journaled;
       if (!id.startsWith('.')) return require(id);
       const target = path.resolve(path.dirname(filename), id);
       return load(path.extname(target) ? target : target + '.js');

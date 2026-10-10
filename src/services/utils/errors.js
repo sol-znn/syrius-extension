@@ -8,6 +8,14 @@
 // Send needs to know what to do next, not which contract rejected the block.
 const knownMessages = [
   {
+    // go-zenon's refusals of a block whose place on the account chain is taken
+    // or gone (verifier/errors.go, chain/account_pool.go). What happened is
+    // that another block from this account got there first: a second device
+    // on the same seed, usually. The wallet's own windows take turns.
+    match: /prevHash exists but it has a cemented block|prevHeight is cemented|previous block is missing|plasma ratio is smaller|hash tie-break is worse/i,
+    text: 'Another transaction from this account landed first. Nothing was sent. Check the account, then send again.',
+  },
+  {
     match: /not enough plasma|plasma.*insufficient/i,
     text: 'Not enough plasma. Fuse QSR or wait for the proof of work to finish.',
   },

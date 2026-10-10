@@ -80,6 +80,7 @@ const fixture = async () => {
   };
   const vault = load('src/services/wallet/vault.js').default;
   const api = load('src/services/wallet/removal.js');
+  const journal = load('src/services/wallet/journal.js').default;
   const read = key => JSON.parse(disk.get(key) || '{}');
   const put = (key, value) => disk.set(key, JSON.stringify(value));
   const add = (name, seed = name, count = 3, base = fixtureAddress(seed, 0)) => {
@@ -116,7 +117,7 @@ const fixture = async () => {
   add('A'); add('B'); await activate(); disk.set(N, 'A');
   put(L, { [fixtureAddress('A', 0)]: 'A first', [fixtureAddress('A', 2)]: 'A highest', [fixtureAddress('B', 0)]: 'B label', unknown: 'unattributed' });
   for (const key of ['nodeList', 'currentNodeUrl', 'syrius.settings', 'znn.ts-chainId']) disk.set(key, 'unchanged ' + key);
-  return { disk, state, writes, notices, navigations, events, vault, api, sdk, read, put, add, activate, capture, remove, hold, ui,
+  return { disk, state, writes, notices, navigations, events, vault, api, journal, sdk, read, put, add, activate, capture, remove, hold, ui,
     storage: load('src/services/utils/storage.js'),
     onDerive: fn => { onDerive = fn; },
     fail: key => { fault = key; }, passwordReads: () => passwordReads, snapshot: () => [...disk.entries()] };
@@ -311,6 +312,34 @@ const watchdog = setTimeout(() => { console.error('Wallet deletion checks timed 
     const first = await store.getKeyPair(0).getAddress(), highest = (await store.getKeyPair(2).getAddress()).toString();
     f.add('SDK', entropy, 3, first); await f.activate('SDK'); f.put(L, { ...f.read(L), [first.toString()]: 'SDK first', [highest]: 'SDK third' });
     assert.equal(await f.vault.verifyPassword('fixture'), true); await f.remove(); assert.equal(f.read(L)[first.toString()], undefined); assert.equal(f.read(L)[highest], undefined); assert(Object.hasOwn(f.read(W), 'A'));
+  }
+  // The wallet's transaction journal is deleted with it, before the keyfile,
+  // under a name read while the wallet was still unlocked. A retained import
+  // of the same seed owns the same account chain and keeps the journal.
+  {
+    const f = await fixture(), key = await f.journal.storageKey();
+    assert.match(key, /^syrius.journal.[0-9a-f]{32}$/);
+    f.disk.set(key, 'encrypted-journal'); f.disk.set('syrius.journal.' + 'f'.repeat(32), 'another wallet');
+    await f.remove();
+    assert.equal(f.disk.has(key), false, 'a removed wallet left its transaction journal behind');
+    assert.equal(f.disk.get('syrius.journal.' + 'f'.repeat(32)), 'another wallet');
+    const order = f.writes.map(([, name]) => name);
+    assert(order.indexOf(key) !== -1 && order.indexOf(key) < order.lastIndexOf(W), 'the journal must go before the keyfile');
+  }
+  {
+    const f = await fixture(); f.add('A duplicate', 'A', 1);
+    const key = await f.journal.storageKey(); f.disk.set(key, 'encrypted-journal');
+    await f.remove();
+    assert.equal(f.disk.get(key), 'encrypted-journal', 'a retained import of the same seed lost its journal');
+  }
+  {
+    // A failed journal deletion leaves the keyfile in place for a retry.
+    const f = await fixture(), key = await f.journal.storageKey(); f.disk.set(key, 'encrypted-journal');
+    const prepared = await f.api.prepareWalletRemoval(f.capture());
+    f.fail(key);
+    assert.throws(() => f.api.commitWalletRemoval(prepared), /write failed/);
+    assert(Object.hasOwn(f.read(W), 'A'), 'the keyfile was deleted although its journal was not');
+    assert.equal(f.disk.get(key), 'encrypted-journal');
   }
   console.log('Wallet deletion regression checks passed');
 })().then(() => clearTimeout(watchdog), error => { clearTimeout(watchdog); console.error(error); process.exitCode = 1; });

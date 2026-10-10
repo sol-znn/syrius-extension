@@ -32,6 +32,14 @@ are held in session storage until completion, cancellation or expiry.
 These records are not all encrypted. Removing a wallet cleans its associated
 metadata and permissions; browser extension removal clears its local storage.
 
+The wallet also keeps a record of the account blocks it has signed and sent:
+the signed block, the account, an identifier of the network and whether the
+node has confirmed it. It exists so that an interrupted send can be checked
+against the node instead of being signed a second time. It is encrypted with a
+key derived from the wallet's own recovery seed, so it can be read only while
+that wallet is unlocked. A record is deleted 24 hours after its outcome is
+known, and all of a wallet's records are deleted when the wallet is removed.
+
 ## Network requests
 
 - **Configured RPC node:** the extension queries account addresses, balances,

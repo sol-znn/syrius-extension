@@ -1,4 +1,5 @@
 import React from 'react';
+import { useSelector } from 'react-redux';
 import { Navigate, Route, Routes, useLocation } from 'react-router-dom';
 
 import Dashboard from '../../pages/dashboard/dashboard/dashboard';
@@ -11,6 +12,7 @@ import Receive from '../../pages/send-receive/receive/receive';
 
 import MenuHeader from '../../pages/menu/menu-header/menu-header';
 import MenuTabs from '../../pages/menu/menu-tabs/menu-tabs';
+import JournalNotice from '../../components/journal-notice/journal-notice';
 
 import Settings from '../../pages/settings/settings/settings';
 import ChangeNode from '../../pages/settings/change-node/change-node';
@@ -40,12 +42,20 @@ const subScreens = {
 const TabsLayout = () => {
   const location = useLocation();
   const subScreenTitle = subScreens[location.pathname];
+  const address = useSelector((state) => state.wallet.address);
+  // A row appearing, settling or failing is each a reason to look again now
+  // rather than at the next poll.
+  const inFlight = useSelector((state) => state.pendingTransactions.items.map((item) => item.status).join());
 
   return (
     <div className="tabs-layout">
       <MenuHeader backButton={Boolean(subScreenTitle)} title={subScreenTitle || ''} />
 
       <main className="menu-layout">
+        {/* Here rather than on the dashboard: a block whose outcome is unknown
+            holds up sending from every screen, and it is settled from
+            whichever one happens to be open. */}
+        <JournalNotice address={address} refreshKey={inFlight} />
         <Routes location={location}>
           <Route index element={<Navigate to="/tabs/dashboard" replace />} />
           <Route path="dashboard" element={<Dashboard />} />
