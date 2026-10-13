@@ -35,6 +35,13 @@ android {
         }
     }
     buildTypes {
+        // A debug build is another app, beside the release. Under one ID
+        // Android refuses the release APK over a debug build, since the keys
+        // differ, and the installer says only "App not installed".
+        debug {
+            applicationIdSuffix ".debug"
+            versionNameSuffix "-debug"
+        }
         release {
             signingConfig releaseKeystore ? signingConfigs.release : null
             minifyEnabled false
