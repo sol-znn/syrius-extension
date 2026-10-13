@@ -280,7 +280,8 @@ const watchdog = setTimeout(() => { console.error('Native document fixture timed
   // Another origin: one origin has one pending connect at a time (#10).
   const second = await open(bOrigin + '/legacy'); await ready(second, bOrigin + '/legacy');
   for (const current of [page, second]) await evaluate(current, "(window.legacy=[],addEventListener('message',e=>{if(e.data?.method==='znn.grantedWalletRead')legacy.push(e.data.data);}),postMessage({method:'znn.requestWalletAccess'},location.origin),true)");
-  const legacy = await eventually(queue, value => value.length === 2, 'two legacy approvals');
+  // Queue insertion precedes asynchronous approval-window presentation.
+  const legacy = await eventually(queue, value => value.length === 2 && value.every(request => shown(request)), 'two shown legacy approvals');
   assert.notEqual(legacy[0].id, legacy[1].id);
   for (const request of legacy) assert.equal(await resolve(request), true);
   for (const current of [page, second]) await eventually(() => evaluate(current, 'legacy'), value => value.length === 1, 'legacy completion');
