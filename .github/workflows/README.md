@@ -32,6 +32,29 @@ The workflow artifact is the extension ZIP itself; it is uploaded with
 recreated for the GitHub Release using the ZIP basename and published alongside
 the package, so it can be verified from an ordinary download directory.
 
+Release-producing package jobs also generate GitHub-signed build provenance for
+the exact Chrome ZIP, unsigned iOS IPA, signed Android APK and signed Firefox
+XPI before uploading them. Only those four jobs request `id-token: write` and
+`attestations: write`; the attestation steps use the release/signing conditions,
+so PR and other validation runs skip them. For release acceptance, verify the
+downloaded package against the expected workflow and full source commit:
+
+```sh
+gh attestation verify <file> -R sol-znn/syrius-extension \
+  --signer-workflow sol-znn/syrius-extension/.github/workflows/build-and-release.yml \
+  --source-digest <expected-full-source-commit> \
+  --deny-self-hosted-runners --format json
+```
+
+Select that expected commit from independent package build records. A platform
+attachment run can build a different commit from the release tag; a matching
+filename or version is not a source pin. Keep the verified JSON result. These
+verification options are documented in the [GitHub CLI manual](https://cli.github.com/manual/gh_attestation_verify).
+An attestation binds the package digest to its workflow/source; it does not
+establish application safety or retroactively attest an existing manually
+uploaded package. Successful release-run generation and independent
+verification remain required.
+
 The ABI comparison requires the definitions checked out at the revision pinned
 in the workflow. Missing or empty definitions fail rather than skip the check;
 no Go compiler or running node is required. The native browser fixtures use the

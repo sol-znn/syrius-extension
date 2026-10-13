@@ -41,6 +41,10 @@ jobs:
     name: Build Chrome/Brave package
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     outputs:
       manifest_version: ${{ steps.metadata.outputs.manifest_version }}
 
@@ -205,6 +209,12 @@ jobs:
           sha256sum "$archive" > "${archive}.sha256"
           printf 'archive_name=%s\n' "$archive" >> "$GITHUB_OUTPUT"
 
+      - name: Attest Chrome/Brave release package
+        if: env.RELEASING == 'true'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ steps.package.outputs.archive_name }}
+
       - name: Upload direct Chrome/Brave package artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -220,6 +230,10 @@ jobs:
     name: Build iOS app (unsigned IPA)
     runs-on: macos-15
     timeout-minutes: 45
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     outputs:
       ipa: ${{ steps.package.outputs.ipa }}
 
@@ -282,6 +296,12 @@ jobs:
           (cd "$RUNNER_TEMP/ipa" && zip -qry "$GITHUB_WORKSPACE/$ipa" Payload)
           printf 'ipa=%s\n' "$ipa" >> "$GITHUB_OUTPUT"
 
+      - name: Attest iOS release package
+        if: env.RELEASING == 'true'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ steps.package.outputs.ipa }}
+
       - name: Upload iOS app artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -297,6 +317,10 @@ jobs:
     name: Build Android app
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     # No file-name output: GitHub drops an output that contains a secret's
     # value, and the key alias is part of the name. The publish job derives it.
 
@@ -367,6 +391,12 @@ jobs:
           fi
           printf 'apk=%s\n' "$apk" >> "$GITHUB_OUTPUT"
 
+      - name: Attest Android release package
+        if: env.RELEASING == 'true' && inputs.platforms != 'ios' && inputs.platforms != 'firefox'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ steps.package.outputs.apk }}
+
       - name: Upload Android app artifact
         if: env.RELEASING == 'true' && inputs.platforms != 'ios' && inputs.platforms != 'firefox'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -384,6 +414,10 @@ jobs:
     name: Build Firefox add-on
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
 
     steps:
       - name: Check out repository
@@ -438,6 +472,12 @@ jobs:
           # manifest's update_url is this file on the latest release).
           XPI="$xpi" VERSION="$version" REPOSITORY="$GITHUB_REPOSITORY" node utils/firefox-updates.js
           printf 'xpi=%s\n' "$xpi" >> "$GITHUB_OUTPUT"
+
+      - name: Attest Firefox release package
+        if: env.RELEASING == 'true' && inputs.platforms != 'ios' && inputs.platforms != 'android'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ steps.package.outputs.xpi }}
 
       - name: Upload Firefox add-on artifact
         if: env.RELEASING == 'true' && inputs.platforms != 'ios' && inputs.platforms != 'android'
