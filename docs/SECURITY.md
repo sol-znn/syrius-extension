@@ -32,11 +32,18 @@
 
 Changing **Lock after** applies to the current session immediately. A shorter
 positive duration clamps its deadline without extending any time already left;
-selecting the same or a longer duration does not reset that deadline. Later
+selecting the same or a longer finite duration does not reset that deadline. Later
 activity can renew it under the selected policy. The policy is held in the
 shared session record and every renewal reads it under the session lock, so an
 operation that began before the setting changed cannot extend the session past
 it.
+
+**Never** disables automatic expiry for the current session as soon as the
+preference and session update succeed; no further activity is needed to remove
+the previous deadline. Manual locking still revokes every window's access, and
+closing the browser clears its memory-only session storage. It does not keep
+the wallet unlocked across a browser restart. Returning to a finite duration
+applies that deadline immediately.
 
 **On close** removes resumable key material and public wallet state from shared
 session storage, retaining only a marker for the current document. A new popup

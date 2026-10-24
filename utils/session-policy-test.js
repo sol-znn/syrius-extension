@@ -201,6 +201,59 @@ const watchdog = setTimeout(() => { console.error('Session policy checks timed o
     await f.api.updateSetting('autoLockMinutes', -1); assert.equal(f.record().minutes, -1);
     f.advance(1000); assert.equal(await f.api.touch(), true); assert.equal(f.record().expiresAt, Number.MAX_SAFE_INTEGER);
   }
+  // Selecting Never in Settings removes the old deadline immediately; no
+  // later user activity or popup reopen is required to activate the choice.
+  {
+    const f = fixture(); await f.unlock(); const before = f.record(); f.advance(60000);
+    const ui = f.ui('src/pages/settings/settings/settings.js');
+    await ui.find(node => node.type === 'button' && node.props.children === 'Never').props.onClick(); ui.render();
+    assert(ui.find(node => node.type === 'button' && node.props.children === 'Never').props.className.includes('is-selected'));
+    assert.equal(f.record().expiresAt, Number.MAX_SAFE_INTEGER);
+    assert.equal(f.record().lastActiveAt, before.lastActiveAt);
+    f.advance(30 * 24 * 3600000); await f.handlers.alarm({ name: 'znn.autoLock' });
+    assert.equal(f.vault.isUnlocked(), true); assert.equal(await f.api.isCurrent(), true);
+    const second = f.realm();
+    await second.boot({ walletName: 'A', record: await second.api.load(), dispatch() {} });
+    assert.equal(second.vault.isUnlocked(), true);
+    await f.load('src/services/wallet/lock.js').default(); await flush();
+    assert(ended(f.record())); assert.equal(second.vault.isUnlocked(), false);
+    await assert.rejects(async () => second.vault.assertSession(), error => error.code === 'WALLET_LOCKED');
+    assert.equal(await second.api.load(), null);
+  }
+  // A failed Never preference must not remove an existing finite deadline,
+  // including one retained by a Never transition from an earlier build.
+  for (const original of [15, -1]) {
+    const f = fixture(); f.disk.set('syrius.settings', JSON.stringify({ autoLockMinutes: original })); await f.unlock();
+    if (original === -1) f.session['znn.unlock'].expiresAt = f.now() + 300000;
+    const before = f.record(); f.faults.disk = 'syrius.settings';
+    await assert.rejects(f.api.updateSetting('autoLockMinutes', -1), /save settings/);
+    assert.deepEqual(f.record(), before);
+    f.advance(before.expiresAt - f.now()); await f.handlers.alarm({ name: 'znn.autoLock' });
+    assert(ended(f.record()));
+  }
+  // Selecting Never again repairs the retained deadline after persistence;
+  // leaving On close also becomes resumable only after a successful save.
+  for (const original of [0, -1]) {
+    const f = fixture(); f.disk.set('syrius.settings', JSON.stringify({ autoLockMinutes: original })); await f.unlock();
+    if (original === -1) f.session['znn.unlock'].expiresAt = f.now() + 300000;
+    await f.api.updateSetting('autoLockMinutes', -1);
+    assert.equal(f.record().expiresAt, Number.MAX_SAFE_INTEGER);
+    assert.equal(f.record().mode, 'timed');
+    f.advance(30 * 24 * 3600000); await f.handlers.alarm({ name: 'znn.autoLock' });
+    assert.equal(await f.api.isCurrent(), true);
+    await f.api.updateSetting('autoLockMinutes', 5);
+    assert.equal(f.record().expiresAt, f.now() + 300000);
+  }
+  // A saved preference whose shared-session commit fails does not authorize
+  // an unbounded signer; the old record still expires and this page is purged.
+  {
+    const f = fixture(); await f.unlock(); const before = f.record(); f.failWrite();
+    await assert.rejects(f.api.updateSetting('autoLockMinutes', -1), error => error.code === 'WALLET_SESSION_UNAVAILABLE');
+    assert.deepEqual(f.record(), before); assert.equal(f.vault.isUnlocked(), false);
+    assert.equal(JSON.parse(f.disk.get('syrius.settings')).autoLockMinutes, -1);
+    f.advance(before.expiresAt - f.now()); await f.handlers.alarm({ name: 'znn.autoLock' });
+    assert(ended(f.record()));
+  }
   {
     const f = fixture(); await f.unlock(); f.advance(13 * 60000); const before = f.record();
     await f.api.updateSetting('autoLockMinutes', 5); assert.equal(f.record().expiresAt, before.expiresAt);

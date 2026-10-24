@@ -175,12 +175,16 @@ const setPolicy = (id, ownerId, minutes, entropy, persist) => transaction(async 
   const previousDeadline = current.mode === 'timed' ? current.expiresAt : current.privateUntil || 0;
   const timed = minutes !== 0;
   const deadline = timed ? Math.min(previousDeadline || Infinity, deadlineFrom(now, minutes)) : 0;
+  const unbounded = minutes === never;
   const { entropy: _entropy, privateUntil: _privateUntil, ...kept } = current;
   // Every policy write gets a new revision; see matchesExpected.
   const next = { ...kept, revision: crypto.randomUUID(), ownerId, minutes, mode: timed ? 'timed' : 'local',
-    expiresAt: deadline, ...(timed ? { entropy } : {}) };
+    expiresAt: unbounded ? Number.MAX_SAFE_INTEGER : deadline, ...(timed ? { entropy } : {}) };
   const removesDeadline = !timed && Boolean(previousDeadline);
-  const relaxing = removesDeadline || (timed && (current.mode === 'local' || longer(minutes, current.minutes)));
+  // Never removes even a deadline retained by an earlier Never transition.
+  // Commit that relaxation only after the preference has been saved.
+  const relaxing = removesDeadline || (timed && (current.mode === 'local' || longer(minutes, current.minutes) ||
+    (unbounded && previousDeadline < Number.MAX_SAFE_INTEGER)));
   const stage = removesDeadline ? { ...next, privateUntil: previousDeadline } :
     current.mode === 'local' && timed ? { ...kept, revision: crypto.randomUUID(), ownerId, privateUntil: deadline } :
       relaxing ? null : next;
