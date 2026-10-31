@@ -192,8 +192,50 @@ const fixture = () => {
     holdStorage: area => (storageGate = { area, started: deferred(), release: deferred() }),
     holdInternal: method => (internalGate = { method, started: deferred(), release: deferred() }) };
 };
+const mobileWindows = platform => {
+  const timers = new Map(); let timerId = 0;
+  const ownedWindow = { location: { href: 'https://app.invalid/popup.html', hash: '#/tabs/dashboard' }, addEventListener() {}, open() {} };
+  const load = loader({ window: ownedWindow, URL,
+    localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
+    process: { env: { SYRIUS_PLATFORM: platform, SYRIUS_MANIFEST: { version: '0.0.0' } } },
+    setTimeout: (fn, ms) => { timers.set(++timerId, { fn, ms }); return timerId; },
+    clearTimeout: id => timers.delete(id), clearInterval() {},
+  }, id => {
+    if (id === './appLinks' || id === './nativeFeatures') return { __esModule: true, default: () => {} };
+    if (id.endsWith('/utils/errors')) return { fail: () => Error('Synthetic window unavailable') };
+  });
+  load('src/platform/mobileShim.js');
+  return { window: ownedWindow, chrome: ownedWindow.chrome, fire: ms => {
+    for (const [id, timer] of [...timers]) if (timer.ms === ms) { timers.delete(id); timer.fn(); }
+  } };
+};
 const watchdog = setTimeout(() => { console.error('Request identity checks timed out'); process.exit(1); }, 45000);
 (async () => {
+  // The app's logical windows obey the same lifetime identity as real ones:
+  // a delayed lookup, removal or route callback cannot reach a reopened window.
+  for (const platform of ['android', 'ios']) {
+    const f = mobileWindows(platform), removed = [];
+    f.chrome.windows.onRemoved.addListener(id => removed.push(id));
+    const url = f.chrome.runtime.getURL('popup.html#/site-integration');
+    const first = (await f.chrome.windows.create({ url })).id;
+    await f.chrome.storage.session.set({ 'znn.pendingRequests': { old: { windowId: first } } });
+    await f.chrome.windows.remove(first);
+    const second = (await f.chrome.windows.create({ url })).id;
+    assert.notEqual(second, first, 'reopening creates a new logical window identity');
+    await assert.rejects(f.chrome.windows.get(first), /unavailable/);
+    await f.chrome.windows.remove(first);
+    assert.equal((await f.chrome.windows.get(second)).id, second, 'a stale removal cannot close the new window');
+    f.fire(400);
+    assert.equal(f.window.location.hash, '#/tabs/dashboard', 'an old route callback cannot open the new window early');
+    await f.chrome.storage.session.set({ 'znn.pendingRequests': { current: { windowId: second } } });
+    f.fire(400);
+    assert.equal(f.window.location.hash, '#/site-integration');
+    assert.equal((await f.chrome.windows.getCurrent()).id, second);
+    assert.equal((await f.chrome.windows.create({ url })).id, second, 'an already open window keeps its identity');
+    f.window.close();
+    assert.deepEqual(removed, [first, second]);
+    await assert.rejects(f.chrome.windows.get(second), /unavailable/);
+  }
   // Unsupported origins never reach the consent queue or open its window.
   for (const from of [
     { origin: 'null', url: 'https://fixture.invalid/app' },
