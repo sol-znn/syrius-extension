@@ -90,9 +90,14 @@ jobs:
           files=(sarif-results/*.sarif)
           test ${#files[@]} -gt 0
           for file in "${files[@]}"; do
+            # A vendor primary location can still have a first-party path.
+            # Keep missing or unresolved locations conservatively.
             jq '.runs |= map(.results |= map(select(
-              [.locations[]?.physicalLocation.artifactLocation.uri // ""] as $uris
-              | ($uris | length > 0) and ($uris | all(startswith("node_modules/")))
+              ([.locations[]?, .relatedLocations[]?,
+                .codeFlows[]?.threadFlows[]?.locations[]?.location?,
+                .stacks[]?.frames[]?.location?]
+                | map(.physicalLocation.artifactLocation.uri // "")) as $uris
+              | ((.locations // [] | length > 0) and ($uris | all(startswith("node_modules/"))))
               | not)))' "$file" > "$file.kept"
             echo "$file: $(jq '[.runs[].results[]] | length' "$file") results, $(jq '[.runs[].results[]] | length' "$file.kept") kept"
             mv "$file.kept" "$file"
