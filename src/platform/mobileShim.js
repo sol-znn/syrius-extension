@@ -191,12 +191,12 @@ const alarms = {
   getAll: api(() => [...alarmTimers.keys()].map((name) => ({ name }))),
 };
 
-// Two windows, both this page. The app's own is 1. The approval window the
-// background opens for an app request (Background/requests.js) is 2: the page
-// goes to its route, and closing it comes back to where the person was and
-// tells the background, as closing the extension's approval window does.
+// The app's own window is 1. Each approval opening gets a fresh identity, as
+// real browser windows do, so late calls cannot target a reopened screen.
+// Closing comes back to the previous route and tells the background.
 const appWindow = { id: 1, type: 'normal', focused: true, state: 'fullscreen' };
-const approvalWindow = { id: 2, type: 'popup', focused: true, state: 'fullscreen' };
+let approvalWindow = { id: 2, type: 'popup', focused: true, state: 'fullscreen' };
+let nextApprovalWindowId = 2;
 let approvalReturn = null;
 const windowsRemoved = event();
 const approvalOpen = () => approvalReturn !== null;
@@ -212,7 +212,11 @@ const approvalOpen = () => approvalReturn !== null;
 const pendingKey = 'znn.pendingRequests';
 const windowLoadMs = 400;
 const openApproval = ({ url }) => {
-  if (!approvalOpen()) approvalReturn = window.location.hash || '#/tabs/dashboard';
+  if (!approvalOpen()) {
+    approvalWindow = { ...approvalWindow, id: nextApprovalWindowId++ };
+    approvalReturn = window.location.hash || '#/tabs/dashboard';
+  }
+  const windowId = approvalWindow.id;
   const route = new URL(url).hash;
   let shown = false;
   const show = () => {
@@ -220,11 +224,11 @@ const openApproval = ({ url }) => {
     shown = true;
     storageChanged.removeListener(watch);
     clearTimeout(fallback);
-    if (approvalOpen()) window.location.hash = route;
+    if (approvalOpen() && approvalWindow.id === windowId) window.location.hash = route;
   };
   const watch = (changes, area) => {
     const pending = area === 'session' ? changes[pendingKey]?.newValue : null;
-    if (pending && Object.values(pending).some((request) => request?.windowId === approvalWindow.id)) {
+    if (pending && Object.values(pending).some((request) => request?.windowId === windowId)) {
       storageChanged.removeListener(watch);
       setTimeout(show, windowLoadMs);
     }
