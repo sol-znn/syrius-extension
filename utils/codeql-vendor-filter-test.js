@@ -8,20 +8,29 @@ const { spawnSync } = require('node:child_process');
 const { test } = require('node:test');
 
 const workflow = fs.readFileSync(path.join(__dirname, '../.github/workflows/codeql.yml'), 'utf8');
-const match = workflow.match(/jq '([\s\S]*?)' "\$file" > "\$file\.kept"/);
-assert.ok(match, 'the production SARIF filter must be exercised');
 const location = uri => ({ physicalLocation: { artifactLocation: { uri } } });
 const vendor = location('node_modules/example/index.js');
 const firstParty = location('src/example.js');
 const result = (ruleId, extra = {}) => ({ ruleId, message: { text: ruleId }, locations: [vendor], ...extra });
 const document = results => ({ version: '2.1.0', runs: [{ tool: { driver: { name: 'Synthetic analyzer' } }, results }] });
-const filter = input => {
+const filter = (input, source = workflow) => {
+  // Git can check out the YAML as CRLF; keep those bytes out of jq's program.
+  const match = source.replace(/\r\n/g, '\n').match(/jq '([\s\S]*?)' "\$file" > "\$file\.kept"/);
+  assert.ok(match, 'the production SARIF filter must be exercised');
   const child = spawnSync('jq', [match[1]], { input: JSON.stringify(input), encoding: 'utf8', maxBuffer: 1024 * 1024 });
   assert.ifError(child.error);
   assert.equal(child.status, 0, child.stderr);
   return JSON.parse(child.stdout);
 };
 const kept = results => filter(document(results)).runs[0].results;
+
+test('accepts LF and CRLF workflow checkouts', () => {
+  const own = result('own', { locations: [firstParty] });
+  const input = document([result('vendor'), own]);
+  for (const source of [workflow.replace(/\r\n/g, '\n'), workflow.replace(/\r?\n/g, '\r\n')]) {
+    assert.deepEqual(filter(input, source), document([own]));
+  }
+});
 
 test('excludes vendor-only primary locations and keeps first-party or mixed primary locations', () => {
   const own = result('own', { locations: [firstParty] });
