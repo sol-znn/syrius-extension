@@ -114,7 +114,7 @@ const MainLayout = () => {
       // Updating the extension needs no wallet, unlocked or not: its tab is
       // left where it was opened (pages/update).
       if (initialPathname === '/update') return;
-      const wallets = loadStorageWalletNames();
+      const wallets = loadStorageWalletNames({ strict: true });
       const isWithin = (route) =>
         initialPathname === route || initialPathname.startsWith(`${route}/`);
       const deepLink = deepLinkRoutes.includes(initialPathname)
@@ -187,7 +187,7 @@ const MainLayout = () => {
 
     boot().catch((error) => {
       if (!cancelled) {
-        setBootError(describe(error?.code === 'WALLET_LOCK_FAILED' ? error : fail(221)).line);
+        setBootError(describe(error?.code === 'WALLET_LOCK_FAILED' || error?.errorId === 225 ? error : fail(221)).line);
       }
     }).finally(() => {
       if (!cancelled) {

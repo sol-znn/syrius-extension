@@ -13,6 +13,7 @@
 const fs = require('node:fs'), path = require('node:path'), os = require('node:os'), http = require('node:http');
 const assert = require('node:assert/strict');
 const { spawn } = require('node:child_process');
+const { connectFirefox } = require('./fixtures/firefox-bidi');
 
 const root = path.join(__dirname, '..');
 const build = path.join(root, 'build-firefox');
@@ -44,18 +45,10 @@ const run = async () => {
     'user_pref("browser.shell.checkDefaultBrowser", false);',
     'user_pref("datareporting.policy.dataSubmissionEnabled", false);',
   ].join('\n'));
-  const port = 9500 + Math.floor(Math.random() * 200);
-  browser = spawn(process.env.FIREFOX_PATH, ['--headless', '--no-remote', '--profile', profile, '--remote-debugging-port', String(port), '--remote-allow-system-access'],
+  browser = spawn(process.env.FIREFOX_PATH, ['--headless', '--no-remote', '--profile', profile, '--remote-debugging-port', '0', '--remote-allow-system-access'],
     { stdio: ['ignore', 'ignore', 'pipe'] });
   browser.stderr.on('data', value => { stderr += value; });
-  for (let i = 0; i < 150 && !socket; i++) {
-    try {
-      const candidate = new WebSocket(`ws://127.0.0.1:${port}/session`);
-      await new Promise((resolve, reject) => { candidate.onopen = resolve; candidate.onerror = reject; });
-      socket = candidate;
-    } catch (error) { await pause(200); }
-  }
-  assert(socket, 'Firefox started: ' + stderr.slice(-400));
+  socket = await connectFirefox({ browser, stderr: () => stderr });
   let id = 0; const pending = new Map();
   socket.onmessage = event => {
     const message = JSON.parse(event.data), call = pending.get(message.id);

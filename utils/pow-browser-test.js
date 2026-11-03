@@ -13,6 +13,7 @@ const fs = require('node:fs'), path = require('node:path'), os = require('node:o
 const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
 const { copyModules } = require('./fixtures/extension-modules');
+const { connectFirefox } = require('./fixtures/firefox-bidi');
 
 const root = path.join(__dirname, '..');
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'syrius-pow-'));
@@ -130,18 +131,10 @@ const firefox = async () => {
     'user_pref("browser.shell.checkDefaultBrowser", false);',
     'user_pref("datareporting.policy.dataSubmissionEnabled", false);',
   ].join('\n'));
-  const port = 9700 + Math.floor(Math.random() * 200);
-  const { browser, stderr } = launch(process.env.FIREFOX_PATH, ['--headless', '--no-remote', '--profile', profile, '--remote-debugging-port', String(port), '--remote-allow-system-access']);
+  const { browser, stderr } = launch(process.env.FIREFOX_PATH, ['--headless', '--no-remote', '--profile', profile, '--remote-debugging-port', '0', '--remote-allow-system-access']);
   let socket;
   try {
-    for (let i = 0; i < 150 && !socket; i++) {
-      try {
-        const candidate = new WebSocket(`ws://127.0.0.1:${port}/session`);
-        await new Promise((resolve, reject) => { candidate.onopen = resolve; candidate.onerror = reject; });
-        socket = candidate;
-      } catch (error) { await pause(200); }
-    }
-    assert(socket, 'Firefox started: ' + stderr().slice(-400));
+    socket = await connectFirefox({ browser, stderr });
     let id = 0; const pending = new Map();
     socket.onmessage = (event) => { const message = JSON.parse(event.data), call = pending.get(message.id); if (call) { pending.delete(message.id); message.type === 'error' ? call.reject(Error(`${message.error}: ${message.message}`)) : call.resolve(message.result); } };
     const bidi = (method, params = {}) => new Promise((resolve, reject) => { const next = ++id; pending.set(next, { resolve, reject }); socket.send(JSON.stringify({ id: next, method, params })); });

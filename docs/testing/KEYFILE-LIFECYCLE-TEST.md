@@ -28,7 +28,7 @@ SYRIUS_LIFECYCLE_REPORT="/path/to/minimum-runtime-report.json" \
 node utils/keyfile-lifecycle-minimum-browser-test.js
 ```
 
-Use a normal graphical session, or run the same command under `xvfb-run -a` on a compatible Linux runner. The wrapper replaces only the test helper's browser transport before requiring the unchanged fifteen-case fixture. It does not replace the SDK, cryptography, UI or storage implementation. A different reported browser version is rejected with a sanitized error after the owned browser is stopped, before any lifecycle or wallet case. Unsupported startup, protocol or reload stages fail explicitly.
+Use a normal graphical session, or run the same command under `xvfb-run -a` on a compatible Linux runner. The wrapper replaces only the test helper's browser transport before requiring the unchanged lifecycle fixture. It does not replace the SDK, cryptography, UI or storage implementation. A different reported browser version is rejected with a sanitized error after the owned browser is stopped, before any lifecycle or wallet case. Unsupported startup, protocol or reload stages fail explicitly.
 
 The legacy transport loads the untouched extension through CLI arguments, discovers its identity through the owned extension settings page, and uses actual `chrome.runtime.reload()` with old-context invalidation and the same enabled extension ID. It does not use modern CDP re-registration. CLI-loaded extension worker startup occurs before CDP attachment: the denying proxy exists before process spawn, but post-attachment counters do not certify that earlier interval. Product popup navigation waits for that page's network guards. This startup limit and the Chromium distribution are recorded in sanitized stats/report metadata.
 
@@ -42,16 +42,20 @@ This result applies to that package and Chromium executable, with the earlier CL
 | --- | --- |
 | Create | Generated phrase confirmation, encrypted SDK keyfile persistence, successful unlock, and expected encrypted keyfile shape. Confirmation supports generated 12- or 24-word phrases, including repeated words; the pinned SDK's random creation uses 32-byte entropy and is expected to produce 24 words. |
 | Unlock | Incorrect password rejected without a live shared unlock; correct password accepted. |
+| Startup read failure | An instrumented read refusal shows E225 and Retry, preserves the encrypted keyfile, and cannot become onboarding. Removing the fault permits a normal retry. |
 | Backup | Incorrect password reveals no phrase DOM; correct password recovers the generated phrase. |
 | Explicit lock | Backup DOM removed from two extension pages, shared secret revoked, and public state withdrawn. A non-secret locked tombstone is permitted. |
 | Password rotation | Incorrect current password preserves the keyfile; valid rotation changes encrypted bytes while preserving account identity. Old password rejected, new password accepted, and recovered phrase unchanged. |
 | Timed document closure | Reopening an extension document resumes the timed session without changing the encrypted entry. |
 | On close | Completed policy stores no resumable entropy or public unlock; closing its owner document makes the next document require a password. |
 | Natural five-minute expiry | Actual elapsed time revokes both extension pages and removes backup DOM. No clocks or session records are shortened by the harness. |
+| Install preparation | A clean empty-profile browser restart retains the enabled extension before any wallet is generated. |
 | Browser restart | Same disposable profile and install directory retain the encrypted wallet, but require its password again. |
-| Runtime reload | `chrome.runtime.reload()` invalidates the old extension generation. The modern transport uses same-path re-registration; the legacy transport verifies the same enabled ID. Both preserve encrypted data and require another password unlock. |
+| Runtime reload | `chrome.runtime.reload()` invalidates the old extension generation. Both transports verify the same enabled ID without a replacement registration. Both preserve encrypted data and require another password unlock. |
 | Recovery import | The generated backup imports under another name with matching account identity and independently encrypted bytes. |
 | Removal | Incorrect password preserves the wallet. Removing one import revokes its session, preserves the other encrypted entry, and leaves that other wallet unlockable. Removing the last wallet returns to onboarding and withdraws shared secrets. |
+
+The startup-read case instruments `Storage.prototype.getItem` for the wallet map in one test page, then restores it and retries. It never supplies or reconstructs a wallet value. This is a controlled storage-boundary refusal, not evidence that the historical CI failure had the same cause.
 
 One case intentionally instruments `Storage.prototype.setItem` to reject the wallet write **after real encryption**. It confirms that the fault was reached, restores the original method, checks that no wallet or live unlock was created, and retries. This is a storage fault-injection case, separate from ordinary real-crypto lifecycle qualification; it does not replace Argon2, AES, or the application callback.
 
@@ -59,7 +63,7 @@ The expiry case initially requires a finite deadline more than 290 seconds and a
 
 ## Isolation and privacy
 
-The input package is copied without modifying its files or CSP. The harness compares a file-tree digest before and after use. That digest identifies the tested members; it is not a ZIP checksum, reproducible-build result, or release attestation. Only connection and receive/lock preferences are initialized in application storage. Chrome's developer mode is enabled through its normal profile configuration API solely in the owned disposable profile. The modern transport reads it back before loading the unpacked package; the legacy transport configures it after CLI startup. Reload requires the same extension ID to be enabled.
+The input package is copied without modifying its files or CSP. The harness compares a file-tree digest before and after use. That digest identifies the tested members; it is not a ZIP checksum, reproducible-build result, or release attestation. Only connection and receive/lock preferences are initialized in application storage. Chrome's developer mode is enabled through its normal profile configuration API solely in the owned disposable profile. The modern transport reads it back before its initial CDP load and native developer reload; the legacy transport configures it after CLI startup. Before the UI creates any wallet data, an empty-profile cold restart must retain the same enabled install after a clean browser exit. The preparation browser's network counters are retained separately. The later wallet-bearing restart remains mandatory. A restart that expects an existing modern install refuses a missing or replaced ID before attempting any load. Reload requires the same extension ID to be enabled; no wallet or storage is restored by the harness.
 
 A local denying proxy, CDP request blocking, and offline conditions guard browser targets before product execution in the modern transport. The optional legacy transport has the earlier CLI worker-startup boundary described above. Local HTTP/WebSocket guard checks must fail, and observed external responses or WebSocket handshake responses fail the run. These are browser-level network guards, not an OS firewall or a claim of zero network attempts. No live node, transaction, or user wallet is used.
 

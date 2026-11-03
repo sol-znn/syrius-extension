@@ -25,4 +25,16 @@ its `moz-extension` origin is fixed by a profile preference, and its own
 background script opens the page, because BiDi may not navigate to one. That
 needs `--remote-allow-system-access`.
 
+Both Firefox browser checks request an automatically assigned debugging port
+and wait for their owned child's `WebDriver BiDi listening` announcement.
+The shared connector accepts only its `127.0.0.1` endpoint, bounds startup to
+60 seconds and each handshake to five seconds, and closes abandoned sockets.
+It does not add an allowed origin or print browser stderr on failure. See
+[Mozilla's connection procedure](https://developer.mozilla.org/en-US/docs/Web/WebDriver/How_to/Create_BiDi_connection).
+
+`node utils/browser-startup-test.js` runs the regular-file and loopback
+connector controls without launching a native browser or creating a profile.
+The complete PoW and Firefox-site checks still require a native browser run;
+connector controls alone do not qualify either browser scenario.
+
 It does not send a block, use a wallet or reach a node.

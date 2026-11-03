@@ -1,4 +1,5 @@
 import { KeyStoreManager } from 'znn-ts-sdk';
+import { fail } from './errors';
 
 // `receiveAllBlocks` moved to services/wallet/account.js, where it is bounded
 // and reports progress. The address bookkeeping moved to services/utils/storage.js,
@@ -15,10 +16,22 @@ import { KeyStoreManager } from 'znn-ts-sdk';
 // own replace with nothing to do, so save and lookup agree on the same key.
 const sanitizeWalletName = (name) => (name || '').trim().replace(/\s+/g, '-');
 
-const loadStorageWalletNames = () => {
+const loadStorageWalletNames = ({ strict = false } = {}) => {
   try {
+    if (strict) {
+      // Only a missing key or a valid empty map establishes a fresh wallet.
+      // The SDK normalizes some invalid roots to an empty map, so inspect the
+      // raw saved map before startup makes a routing decision. Never rewrite
+      // it or include its contents in the failure.
+      const raw = localStorage.getItem(walletStorageKey);
+      if (raw === null) return [];
+      const wallets = JSON.parse(raw);
+      if (!wallets || typeof wallets !== 'object' || Array.isArray(wallets)) throw fail(225);
+      return Object.keys(wallets);
+    }
     return Object.keys(new KeyStoreManager().listAllKeyStores() || {});
   } catch (err) {
+    if (strict) throw fail(225);
     return [];
   }
 };

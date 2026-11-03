@@ -79,6 +79,7 @@ const catalog = {
   222: 'Encrypted wallet data could not be created safely. No wallet was saved.',
   223: 'Saved wallet data could not be read safely. No wallet was saved.',
   224: 'The selected account changed. Refresh the wallet and try again.',
+  225: 'Saved wallet data could not be read safely. Your saved data has not been changed. Retry or close and reopen the browser.',
 
   // The Zenon node and Zenon blocks
   300: 'The node refused this: {reason}',
