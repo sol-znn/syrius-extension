@@ -54,7 +54,7 @@
     "react-router-dom": "^7.18.5",
     "react-toastify": "^11.2.0",
     "readable-stream": "^3.6.0",
-    "sass": "^1.107.0",
+    "sass": "^1.107.1",
     "stream-browserify": "^3.0.0",
     "url-loader": "^4.1.1",
     "znn-ts-sdk": "https://codeload.github.com/DexterLabZ/znn.ts/tar.gz/63c4cad42fd08604f9a2e74f68418dccc1cb4f86"
