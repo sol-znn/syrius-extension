@@ -43,8 +43,16 @@ const labels = {
 };
 // Quotes preserve empty strings and whitespace. Formatting controls are escaped
 // visibly, including a leading BOM, rather than changing the apparent value.
-const displayString = text => JSON.stringify(text).replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu,
-  char => Array.from({ length: char.length }, (_, index) => '\\u' + char.charCodeAt(index).toString(16).padStart(4, '0')).join(''));
+const escapeCodeUnits = char => Array.from({ length: char.length }, (_, index) =>
+  '\\u' + char.charCodeAt(index).toString(16).padStart(4, '0')).join('');
+const displayString = text => JSON.stringify(text).replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, escapeCodeUnits);
+
+// Preserve ordinary line breaks. Escape literal backslashes as well so that
+// someone reading the preview can tell a typed escape from an actual control.
+const displayApprovalMessage = text => text.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\\]/gu, char => {
+  if (char === '\n') return char;
+  return char === '\\' ? '\\\\' : escapeCodeUnits(char);
+});
 // All 77 pinned methods use scalar words, strings/bytes, or these one-level
 // arrays. Offsets must describe sequential, non-overlapping canonical tails.
 const dynamic = type => type === 'string' || type === 'bytes' || type.endsWith('[]');
@@ -148,4 +156,4 @@ const decodeApprovalCall = json => {
     return { kind: 'unknownCall', contract: contract ? contractDisplayName(contract.name) : 'unrecognized', to: json?.toAddress };
   }
 };
-export { decodeApprovalCall, displayString };
+export { decodeApprovalCall, displayApprovalMessage, displayString };
