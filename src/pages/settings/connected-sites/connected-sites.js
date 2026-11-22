@@ -91,11 +91,7 @@ const ConnectedSites = () => {
 
       {sites.map((site) => (
         <div key={JSON.stringify([site.origin, selection.scopeKey(site.scope)])} className="site-row">
-          {site.favicon ? (
-            <img className="site-favicon" alt="" src={site.favicon} width="20" height="20" />
-          ) : (
-            <div className="site-favicon site-favicon-blank" />
-          )}
+          <div className="site-favicon site-favicon-blank" aria-hidden="true" />
 
           <div className="site-row-text">
             <div className="site-host">{hostOf(site.origin)}</div>

@@ -156,7 +156,8 @@ const queueApproval = async (type, { id, target, origin, sender, params, stored 
     navigationTab: target.navigationTab,
     navigationFrame: target.navigationFrame,
     title: sender.tab?.title || '',
-    favicon: sender.tab?.favIconUrl || '',
+    // Keep the queue shape for existing requests without collecting a URL.
+    favicon: '',
     createdAt: Date.now(),
   });
   return { settled: false, present: identityOf(queued) };
@@ -301,7 +302,7 @@ const internalMethods = {
       catch (error) { console.error('Unable to save approval follow-up allowance', error); }
       checkDeadline();
       if (request.type === 'connect') {
-        if (!(await permissions.grant(request.origin, request.binding.scope, { title: request.title, favicon: request.favicon },
+        if (!(await permissions.grant(request.origin, request.binding.scope, { title: request.title },
           { expiresAt: request.expiresAt, confirm: complete }))) throw fail(802);
       } else complete();
       await delivery;

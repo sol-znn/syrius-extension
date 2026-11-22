@@ -67,17 +67,7 @@ const describeBlock = (json) => ({
 
 const SiteHeader = ({ request }) => (
   <div className="site-header">
-    {request.favicon ? (
-      <img
-        className="site-favicon"
-        alt=""
-        src={request.favicon}
-        width="28"
-        height="28"
-      />
-    ) : (
-      <div className="site-favicon site-favicon-blank" />
-    )}
+    <div className="site-favicon site-favicon-blank" aria-hidden="true" />
     <div className="site-header-text">
       <div id="approval-origin" className="site-host approval-origin">{typeof request.origin === 'string' && request.origin ? request.origin : 'Unknown site'}</div>
       {typeof request.origin === 'string' && request.origin.startsWith('http:') && (
