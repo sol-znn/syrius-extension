@@ -45,8 +45,11 @@ const run = async () => {
     'user_pref("browser.shell.checkDefaultBrowser", false);',
     'user_pref("datareporting.policy.dataSubmissionEnabled", false);',
   ].join('\n'));
-  browser = spawn(process.env.FIREFOX_PATH, ['--headless', '--no-remote', '--profile', profile, '--remote-debugging-port', '0', '--remote-allow-system-access'],
-    { stdio: ['ignore', 'ignore', 'pipe'] });
+  // Older Firefox honors the flag. Current Firefox reads the child environment.
+  browser = spawn(process.env.FIREFOX_PATH,
+    ['--headless', '--no-remote', '--profile', profile, '--remote-debugging-port', '0', '--remote-allow-system-access'],
+    { stdio: ['ignore', 'ignore', 'pipe'], env: { ...process.env, MOZ_REMOTE_ALLOW_SYSTEM_ACCESS: '1' } },
+  );
   browser.stderr.on('data', value => { stderr += value; });
   socket = await connectFirefox({ browser, stderr: () => stderr });
   let id = 0; const pending = new Map();

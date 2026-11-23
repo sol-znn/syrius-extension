@@ -69,8 +69,8 @@ const check = (browserName, raw) => {
   console.log(`${browserName}: ${result.made} workers, estimate ${(estimate.estimateMs / 1000).toFixed(1)} s, took ${(result.ms / 1000).toFixed(1)} s`);
 };
 
-const launch = (executable, args) => {
-  const browser = spawn(executable, args, { stdio: ['ignore', 'ignore', 'pipe'] });
+const launch = (executable, args, env = process.env) => {
+  const browser = spawn(executable, args, { stdio: ['ignore', 'ignore', 'pipe'], env });
   let stderr = '';
   browser.stderr.on('data', (value) => { stderr += value; });
   return { browser, stderr: () => stderr };
@@ -131,7 +131,13 @@ const firefox = async () => {
     'user_pref("browser.shell.checkDefaultBrowser", false);',
     'user_pref("datareporting.policy.dataSubmissionEnabled", false);',
   ].join('\n'));
-  const { browser, stderr } = launch(process.env.FIREFOX_PATH, ['--headless', '--no-remote', '--profile', profile, '--remote-debugging-port', '0', '--remote-allow-system-access']);
+  // Keep the launch flag for older Firefox releases. Current releases read
+  // the environment only in the disposable child process.
+  const { browser, stderr } = launch(
+    process.env.FIREFOX_PATH,
+    ['--headless', '--no-remote', '--profile', profile, '--remote-debugging-port', '0', '--remote-allow-system-access'],
+    { ...process.env, MOZ_REMOTE_ALLOW_SYSTEM_ACCESS: '1' },
+  );
   let socket;
   try {
     socket = await connectFirefox({ browser, stderr });
