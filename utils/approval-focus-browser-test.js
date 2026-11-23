@@ -38,7 +38,7 @@ const watchdog = setTimeout(interrupted, 120000);
     'src/services/utils/format.js', 'src/services/utils/publicNodeUrl.js',
     'src/services/utils/approvalIdentity.js', 'src/services/utils/documentBinding.js',
     'src/services/utils/nativeNavigation.js', 'src/services/utils/errors.js', 'src/services/utils/errorCatalog.js',
-    'src/services/utils/approvalDeadline.js',
+    'src/services/utils/approvalDeadline.js', 'src/services/utils/approvalText.js',
   ];
   for (const file of files) write(file, fs.readFileSync(path.join(root, file)));
   write('manifest.json', JSON.stringify({ manifest_version: 3, name: 'Inert approval focus checks', version: '1.0',
@@ -63,7 +63,7 @@ const address='synthetic-account-'+ 'a'.repeat(44), binding={id:'inert-binding',
 let state={wallet:{address,isUnlocked:true},connectionParameters:{chainIdentifier:69,nodeUrl:'wss://node.fixture.invalid:35998'}},queue=[],sequence=0,preparation;
 const listeners=new Set(),storageListeners=new Set(),counts={claims:0,rejections:0};
 const store={getState:()=>state,subscribe:fn=>{listeners.add(fn);return()=>listeners.delete(fn);},dispatch:()=>{}};
-const request=(type='signMessage',label='Initial',ttl=60000)=>({version:4,id:'inert-'+(++sequence),type,params:type==='signMessage'?{message:'Inert message '+label+'\\n'+'Long review text '.repeat(100)}:{to:address,toAddress:address,tokenStandard:'zts1znnxxxxxxxxxxxxx9z4ulx',amount:'1'.repeat(78),chainIdentifier:69,data:''},origin:'https://'+label.toLowerCase()+'.fixture.invalid:8443',title:label,tabId:1,frameId:0,documentId:'inert-document',responseId:'inert-response-'+sequence,activation:crypto.randomUUID(),requestToken:crypto.randomUUID(),navigationTab:'inert-tab',navigationFrame:'inert-frame',binding,createdAt:Date.now(),expiresAt:Date.now()+ttl});
+const request=(type='signMessage',label='Initial',ttl=60000)=>({version:4,id:'inert-'+(++sequence),type,params:type==='signMessage'?{message:'Inert message '+label+'\\n'+(label==='MessagePreview'?'\\t':'')+'Long review text '.repeat(100)}:{to:address,toAddress:address,tokenStandard:'zts1znnxxxxxxxxxxxxx9z4ulx',amount:'1'.repeat(78),chainIdentifier:69,data:''},origin:'https://'+label.toLowerCase()+'.fixture.invalid:8443',title:label,tabId:1,frameId:0,documentId:'inert-document',responseId:'inert-response-'+sequence,activation:crypto.randomUUID(),requestToken:crypto.randomUUID(),navigationTab:'inert-tab',navigationFrame:'inert-frame',binding,createdAt:Date.now(),expiresAt:Date.now()+ttl});
 const replace=(type,label,ttl)=>{const next=request(type,label,ttl);queue=[next];for(const fn of storageListeners)fn({'znn.pendingRequests':{newValue:{[next.id]:next}}},'session');return next.id;};
 window.fixture={binding,counts,replace,request,queueOnly:next=>{queue=[next];},bump:()=>{state={...state,wallet:{...state.wallet,revision:Math.random()}};listeners.forEach(fn=>fn());},
  temporarilyEmpty:()=>{const saved=queue;queue=[];for(const fn of storageListeners)fn({'znn.pendingRequests':{newValue:{}}},'session');setTimeout(()=>{queue=saved;},100);},
@@ -248,6 +248,9 @@ queue=[request()];createRoot(document.querySelector('#app-container')).render(<P
   await evaluate('fixture.releasePreparation()');
   stage = 'message preview keyboard access';
   await replace('signMessage', 'MessagePreview');
+  const previewPrefix = 'Inert message MessagePreview\n\\u0009Long review text';
+  assert.equal(await evaluate(`document.querySelector('.message-preview').textContent.startsWith(${jsLiteral(previewPrefix)})`), true);
+  assert.equal(await evaluate("document.querySelector('.message-preview').getAttribute('aria-describedby')"), 'message-preview-format');
   await preview('.message-preview', 'Message to sign');
   stage = 'message preview position ownership';
   await preservePreviewPosition('.message-preview');

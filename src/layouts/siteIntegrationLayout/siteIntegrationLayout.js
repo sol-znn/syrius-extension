@@ -25,7 +25,8 @@ import {
 } from '../../services/utils/format';
 import { describe, fail, readableError } from '../../services/utils/errors';
 import { notify } from '../../services/utils/notify';
-import { decodeApprovalCall, displayApprovalMessage } from '../../services/utils/approvalContractCalls';
+import { decodeApprovalCall } from '../../services/utils/approvalContractCalls';
+import { displayApprovalMessage } from '../../services/utils/approvalText';
 
 // What a site is asking for, and the choice about it.
 //
