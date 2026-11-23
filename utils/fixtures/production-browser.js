@@ -26,9 +26,10 @@ const findBrowser = () => {
   return executable;
 };
 
-const startBrowser = async ({ extensionDir, profileDir, setupScript = '' }) => {
+const startBrowser = async ({ extensionDir, profileDir, setupScript = '', expectedExtensionId }) => {
   if (!path.isAbsolute(extensionDir || '') || !path.isAbsolute(profileDir || '') ||
-      !fs.existsSync(path.join(extensionDir, 'manifest.json')) || typeof setupScript !== 'string') {
+      !fs.existsSync(path.join(extensionDir, 'manifest.json')) || typeof setupScript !== 'string' ||
+      (expectedExtensionId !== undefined && !/^[a-p]{32}$/.test(expectedExtensionId))) {
     throw failure('BROWSER_CONFIGURATION_INVALID');
   }
   const executable = findBrowser();
@@ -380,6 +381,9 @@ const startBrowser = async ({ extensionDir, profileDir, setupScript = '' }) => {
     };
     let installed = await matchingInstalls();
     if (installed.length > 1) throw failure('BROWSER_EXTENSION_AMBIGUOUS');
+    if (expectedExtensionId !== undefined && (installed.length !== 1 || installed[0].id !== expectedExtensionId)) {
+      throw failure('BROWSER_PERSISTENT_INSTALL_MISSING');
+    }
     if (installed.length === 1) {
       if (installed[0].enabled !== true) throw failure('BROWSER_EXTENSION_DISABLED');
       extensionId = installed[0].id;
