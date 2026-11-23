@@ -26,6 +26,7 @@ import {
 import { describe, fail, readableError } from '../../services/utils/errors';
 import { notify } from '../../services/utils/notify';
 import { decodeApprovalCall } from '../../services/utils/approvalContractCalls';
+import { displayApprovalMessage } from '../../services/utils/approvalText';
 
 // What a site is asking for, and the choice about it.
 //
@@ -67,17 +68,7 @@ const describeBlock = (json) => ({
 
 const SiteHeader = ({ request }) => (
   <div className="site-header">
-    {request.favicon ? (
-      <img
-        className="site-favicon"
-        alt=""
-        src={request.favicon}
-        width="28"
-        height="28"
-      />
-    ) : (
-      <div className="site-favicon site-favicon-blank" />
-    )}
+    <div className="site-favicon site-favicon-blank" aria-hidden="true" />
     <div className="site-header-text">
       <div id="approval-origin" className="site-host approval-origin">{typeof request.origin === 'string' && request.origin ? request.origin : 'Unknown site'}</div>
       {typeof request.origin === 'string' && request.origin.startsWith('http:') && (
@@ -386,6 +377,8 @@ const SiteIntegrationLayout = () => {
   }
 
   const busy = isBusy || isSending;
+  const messagePreview = request.type === 'signMessage' ? displayApprovalMessage(request.params.message) : null;
+  const escapedMessage = messagePreview !== null && messagePreview !== request.params.message;
   // The site is blocked on the signed block, so this screen is the one place
   // that still waits — but it waits in place, on its own button, rather than
   // behind a modal that hides what is being approved.
@@ -537,9 +530,18 @@ const SiteIntegrationLayout = () => {
               read, and only for a site you meant to sign in to.
             </p>
 
-            {/* Verbatim, wrapped, and never interpreted: the point of this
-                panel is that what gets signed is what is on screen. */}
-            <pre className="message-preview" tabIndex={0} role="region" aria-label="Message to sign">{request.params.message}</pre>
+            <pre
+              className="message-preview"
+              tabIndex={0}
+              role="region"
+              aria-label="Message to sign"
+              aria-describedby={escapedMessage ? 'message-preview-format' : undefined}
+            >{messagePreview}</pre>
+            {escapedMessage && (
+              <p id="message-preview-format" className="approval-note">
+                Invisible control characters and backslashes are shown as escapes.
+              </p>
+            )}
 
             <dl className="confirm-details">
               <dt>Signing as</dt>

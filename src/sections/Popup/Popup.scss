@@ -2583,7 +2583,7 @@ button.settings-item {
 // A message a site asked to have signed, and the same message on the way back
 // out of the manual screen. Unlike a block preview this is somebody's prose, so
 // it wraps rather than scrolling sideways, and it keeps the newlines it was
-// given — what is signed is what is on screen, down to the whitespace.
+// given. The approval view escapes controls and keeps ordinary line breaks.
 .message-preview {
   max-height: 200px;
   overflow-y: auto;

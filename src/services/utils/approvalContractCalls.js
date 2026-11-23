@@ -2,6 +2,7 @@ import { Primitives } from 'znn-ts-sdk';
 import abi from './contractCallSchemas.json';
 import { selectorOf, contractDisplayName, describeCall } from './contractCalls';
 import { fail } from './errors';
+import { displayString } from './approvalText';
 
 // This approval decoder is intentionally separate from the selector-only
 // transaction-history API. Known means every argument was decoded exactly.
@@ -41,10 +42,6 @@ const labels = {
   keyGenThreshold: 'Key generation participant threshold', confirmationsToFinality: 'Confirmations to finality (momentums)',
   estimatedMomentumTime: 'Estimated momentum time (protocol value)',
 };
-// Quotes preserve empty strings and whitespace. Formatting controls are escaped
-// visibly, including a leading BOM, rather than changing the apparent value.
-const displayString = text => JSON.stringify(text).replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu,
-  char => Array.from({ length: char.length }, (_, index) => '\\u' + char.charCodeAt(index).toString(16).padStart(4, '0')).join(''));
 // All 77 pinned methods use scalar words, strings/bytes, or these one-level
 // arrays. Offsets must describe sequential, non-overlapping canonical tails.
 const dynamic = type => type === 'string' || type === 'bytes' || type.endsWith('[]');

@@ -24,9 +24,10 @@
   the node URL. It is never permission to move anything: signing and sending are
   prompted every time, and connected origins can be revoked under
   Settings → Connected sites.
-- Signing a message is prompted every time too, and the message is shown
-  verbatim before the key touches it. It always signs as the address the person
-  has selected — a site cannot choose which one answers.
+- Signing a site message requires approval every time. The preview shows
+  invisible control characters and backslashes as escapes and keeps line
+  breaks. The signature uses the original UTF-8 bytes and the selected
+  account's key.
 
 ## Lock-duration changes
 

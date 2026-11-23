@@ -39,6 +39,7 @@ const loader = (environment = {}, overrides = () => undefined) => {
   return load;
 };
 const origin = 'https://approved.invalid', other = 'https://unconnected.invalid';
+const legacyIcon = 'https://media.fixture.invalid/site-icon.png';
 const privateUrl = 'wss://fixture-user:fixture-password@node.invalid:35998/private-rpc?apiKey=fixture-query#fixture-fragment';
 const descriptor = 'wss://node.invalid:35998', address = 'synthetic-address';
 const scope = { walletName: 'fixture', walletId: address, address, index: 0 }, selectionId = 'fixture-selection';
@@ -81,7 +82,7 @@ const fixture = () => {
     remove: async key => { for (const k of Array.isArray(key) ? key : [key]) delete values[k]; },
   });
   const event = key => ({ addListener: fn => { listeners[key] = fn; } });
-  const sender = (site = origin, tabId = 1, documentId = 'doc-' + tabId) => ({ id: 'fixture', url: site + '/app', origin: site, tab: { id: tabId }, frameId: 0, documentId });
+  const sender = (site = origin, tabId = 1, documentId = 'doc-' + tabId) => ({ id: 'fixture', url: site + '/app', origin: site, tab: { id: tabId, favIconUrl: legacyIcon }, frameId: 0, documentId });
   const extension = { id: 'fixture', url: 'chrome-extension://fixture/popup.html' };
   const chrome = {
     runtime: { id: 'fixture', getURL: p => 'chrome-extension://fixture/' + p, onMessage: event('message'), onInstalled: event('installed'), onStartup: event('startup') },
@@ -229,6 +230,7 @@ const fixture = () => {
   {
     const f = fixture(); f.unlock(); const connecting = f.request('znn_connect'); await flush();
     const row = await f.internal('approvals.next', { binding: { id: selectionId, ownerId: 'owner', scope } }); assert(row);
+    assert.equal(row.favicon, '', 'new approvals do not collect the tab icon URL');
     const identity = f.load('src/services/utils/approvalIdentity.js').identityOf(row);
     const claim = await f.internal('approvals.claim', { identity, windowId: row.windowId }); assert(claim);
     f.faults.localWrite = true;
@@ -239,6 +241,7 @@ const fixture = () => {
     // Existing Settings handlers keep their rows and show an error when the
     // background cannot persist disconnection; the same buttons support retry.
     const f = fixture(); await f.permissions.grant(origin); await f.permissions.grant(other);
+    f.local['syrius.permissions'].entries[0].favicon = legacyIcon;
     const states = [], pendingEffects = [], notices = []; let cursor = 0, mounted = false, tree;
     const hooks = { ...React, useState: initial => {
       const i = cursor++; if (!(i in states)) states[i] = initial;
@@ -256,6 +259,10 @@ const fixture = () => {
     assert(renderToStaticMarkup(tree).includes('Unable to load connected sites'));
     assert(!renderToStaticMarkup(tree).includes('No sites are connected'));
     f.faults.local = false; await click('Retry'); assert.equal(states[0].length, 2); notices.length = 0;
+    assert(states[0].some(site => site.favicon === legacyIcon));
+    const sitesHtml = renderToStaticMarkup(tree);
+    assert(sitesHtml.includes('site-favicon-blank'));
+    assert(!sitesHtml.includes(legacyIcon));
     f.faults.localWrite = true; await click('Disconnect'); await click('Disconnect all wallets and accounts');
     assert.equal(states[0].length, 2); assert(renderToStaticMarkup(tree).includes('Access blocked. Retry disconnect.')); assert.equal(notices.filter(x => x.success).length, 0); assert.equal(notices.filter(x => x.error).length, 2);
     f.faults.localWrite = false; await click('Disconnect all wallets and accounts'); assert.equal(states[0].length, 0); assert.equal(notices.filter(x => x.success).length, 1);
@@ -385,14 +392,18 @@ const fixture = () => {
     assert.equal(f.localStorage.getItem('currentNodeUrl'), selected); assert.equal(published.at(-1).nodeUrl, 'wss://second.invalid');
   }
   {
-    let first = true, closed = 0; const notices = [];
+    let first = true, closed = 0, resolved = false; const notices = [];
     const state = { wallet: { address, isUnlocked: true }, connectionParameters: { chainIdentifier: 7, nodeUrl: privateUrl } };
     // A connect request as the screen receives one: bound to the wallet account
     // it was shown for, with its deadline.
     const binding = Object.freeze({ id: selectionId, ownerId: 'owner', scope: Object.freeze({ ...scope }) });
-    const consent = { id: 'consent', type: 'connect', origin, params: {}, binding, expiresAt: Date.now() + 60000 };
+    const consent = { id: 'consent', type: 'connect', origin, params: {}, binding, favicon: legacyIcon, expiresAt: Date.now() + 60000 };
     const hooks = { ...React, useState: initial => [first ? (first = false, consent) : initial, () => {}], useEffect() {}, useCallback: fn => fn, useRef: current => ({ current }) };
-    const load = loader({ window: { close: () => { closed++; } }, setTimeout: fn => setTimeout(fn, 0) }, id => {
+    const load = loader({
+      chrome: { windows: { getCurrent: async () => ({ id: 10 }) } },
+      window: { close: () => { closed++; } },
+      setTimeout: (fn, delay, ...args) => setTimeout(fn, delay === 1200 ? 0 : delay, ...args),
+    }, id => {
       if (id === 'react') return hooks;
       if (id === 'react-redux') return { useSelector: fn => fn(state) };
       if (id === 'react-router-dom') return { useNavigate: () => () => {} };
@@ -401,15 +412,22 @@ const fixture = () => {
       if (id.endsWith('/hooks/useAccount')) return { __esModule: true, default: () => ({ balanceMap: {} }) };
       if (id.endsWith('/hooks/useBlockSender')) return { __esModule: true, default: () => ({}) };
       if (id.endsWith('/utils/notify')) return { notify: { error: value => notices.push(String(value)) } };
-      if (id.endsWith('/utils/messaging')) return { sendInternal: async method => method === 'approvals.resolve' ? false : null };
+      if (id.endsWith('/utils/messaging')) return { sendInternal: async (method, payload) => {
+        if (method === 'approvals.claim') return payload.identity;
+        if (method === 'approvals.checkClaim') return true;
+        if (method === 'approvals.resolve') resolved = true;
+        return false;
+      } };
       if (id.endsWith('/wallet/vault') || id.endsWith('/wallet/signMessage') || id.endsWith('/utils/notify') || id.endsWith('/utils/messaging') || id.endsWith('/utils/contract-calls')) return {};
     });
     const Component = load('src/layouts/siteIntegrationLayout/siteIntegrationLayout.js').default;
     const tree = Component(), html = renderToStaticMarkup(tree);
+    assert(html.includes('site-favicon-blank'));
+    assert(!html.includes(legacyIcon));
     assert(html.includes(descriptor)); assert(html.includes('Node host')); assert(!html.includes('fixture-password')); assert(!html.includes('private-rpc'));
     const findConnect = node => Array.isArray(node) ? node.map(findConnect).find(Boolean) : node?.props ?
       (node.type === 'button' && String(node.props.children).trim() === 'Connect' ? node : findConnect(node.props.children)) : null;
-    await findConnect(tree).props.onClick(); assert.equal(notices.length, 1); assert.equal(closed, 1);
+    await findConnect(tree).props.onClick(); assert(resolved); assert.equal(notices.length, 1); assert.equal(closed, 1);
   }
   console.log('provider state: document-bound events, persisted revocation denials, serialized permission mutations, honest disconnect/grant failures, actual Settings retry, current consent, revoked/locked reads, redacted publication and events, actual modern/legacy relay, private SDK selection/fallback and consent display passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });

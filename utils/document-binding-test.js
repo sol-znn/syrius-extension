@@ -232,7 +232,7 @@ const fixture = ({ firefox = false } = {}) => {
 const approvalUI = (f, windowId) => {
   const states = [], refs = [], callbacks = [], effects = [];
   let si, ri, ci, ei, tree, closed = 0;
-  const counters = { signs: 0, published: 0, notices: [] };
+  const counters = { signs: 0, signedBytes: [], published: 0, notices: [] };
   const gates = {};
   const pause = async phase => { const gate = gates[phase]; if (gate) { delete gates[phase]; gate.started.resolve(); await gate.release.promise; } };
   const sameDeps = (a, b) => a && b && a.length === b.length && a.every((v, i) => Object.is(v, b[i]));
@@ -243,7 +243,12 @@ const approvalUI = (f, windowId) => {
     useEffect: (fn, deps) => { const i = ei++; if (!sameDeps(effects[i]?.deps, deps)) effects[i] = { fn, deps, cleanup: effects[i]?.cleanup, pending: true }; },
   };
   const key = { getAddress: async () => address, getPublicKey: async () => Buffer.alloc(32, 7),
-    sign: async () => { counters.signs++; await pause('sign'); return Buffer.alloc(64, 9); } };
+    sign: async bytes => {
+      counters.signs++;
+      counters.signedBytes.push(Buffer.from(bytes));
+      await pause('sign');
+      return Buffer.alloc(64, 9);
+    } };
   const vault = { getKeyPair: () => key, getSigningKeyPair: async () => { await pause('key'); return key; },
     getBinding: () => binding, whileBound: async (_, operation) => operation(),
     isUnlocked: () => true, getWalletName: () => 'fixture' };
@@ -273,6 +278,8 @@ const approvalUI = (f, windowId) => {
   const drain = async () => { for (let i = 0; i < 6; i++) { await f.flush(); render(); f.timeout(1200); } };
   render();
   return { counters, drain, render,
+    messagePreview: () => flatten(tree).find(element => element.type === 'pre' &&
+      element.props['aria-label'] === 'Message to sign'),
     // The screen's approving button: the one that is not Reject.
     approve: () => { const buttons = flatten(tree).filter(element => element.type === 'button'); assert.equal(buttons.length, 2); return buttons[1].props.onClick; },
     hold: phase => gates[phase] = { started: deferred(), release: deferred() },
@@ -555,19 +562,30 @@ const watchdog = setTimeout(() => { console.error('Document regression fixture t
   // The actual approval component runs all four legitimate paths once despite
   // two immediate button invocations. Node, key and publication are synthetic.
   const block = sdk.Primitives.AccountBlockTemplate.send(address, token, BigNumber.from(1)).toJson();
-  const paramsFor = method => method === 'signMessage' ? 'synthetic approved message'
+  const message = 'Review "Caf\u00e9"\nOriginal \\u200b separator\t\u200b\u202e';
+  const preview = 'Review "Caf\u00e9"\nOriginal \\\\u200b separator\\u0009\\u200b\\u202e';
+  const paramsFor = method => method === 'signMessage' ? message
     : method === 'sendAccountBlock' ? block : { to: account, tokenStandard: token.toString(), amount: '1' };
   for (const method of ['connect', 'signMessage', 'sendTransaction', 'sendAccountBlock']) {
     const f = fixture(), a = f.page(); if (method !== 'connect') f.connected('https://site.invalid');
     const result = a.window.zenon[method](paramsFor(method)); await f.flush();
     const [row] = await f.internal('approvals.list'); assert(row, 'queued ' + method);
     const ui = approvalUI(f, row.windowId); await ui.drain(); const approve = ui.approve();
+    if (method === 'signMessage') {
+      const rendered = ui.messagePreview();
+      assert.equal(rendered?.props.children, preview);
+      assert.equal(rendered?.props['aria-describedby'], 'message-preview-format');
+    }
     const one = approve(), duplicate = approve(); await ui.drain(); await Promise.all([one, duplicate]);
     const value = await result;
     assert.equal(ui.counters.signs, method === 'connect' ? 0 : 1);
     assert.equal(ui.counters.published, ['sendTransaction', 'sendAccountBlock'].includes(method) ? 1 : 0);
     if (method === 'connect') assert.deepEqual(value, [account]);
-    else if (method === 'signMessage') assert.equal(value.signature, '09'.repeat(64));
+    else if (method === 'signMessage') {
+      assert.equal(value.signature, '09'.repeat(64));
+      assert.equal(value.message, message);
+      assert.deepEqual(ui.counters.signedBytes, [Buffer.from(message, 'utf8')]);
+    }
     else assert.equal(typeof value.hash, 'string');
     ui.dispose();
   }
